@@ -1,0 +1,21 @@
+{
+  "name": "ledgerline",
+  "version": "1.0.0",
+  "description": "LedgerLine - Financial Ledger Application",
+  "private": true,
+  "scripts": {
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "start:backend": "npm --prefix backend start",
+    "build:frontend": "npm --prefix frontend run build",
+    "test:backend": "npm --prefix backend test"
+  },
+  "keywords": [
+    "ledger",
+    "finance",
+    "accounting",
+    "fullstack"
+  ],
+  "author": "",
+  "license": "ISC"
+}
