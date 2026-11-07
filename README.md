@@ -1,8 +1,6 @@
 # ⚖️ LedgerLine - Financial Ledger Application
 
-LedgerLine is a secure, double-entry financial ledger application engineered for high-integrity financial transactions, immutability, and compliance.
-
-This repository is organized as a clean full-stack workspace featuring an Express REST API backend, a React/Vite frontend, and a PostgreSQL relational database.
+LedgerLine is a financial ledger application built with Node.js, Express, PostgreSQL, and React with Vite.
 
 ---
 
@@ -10,13 +8,12 @@ This repository is organized as a clean full-stack workspace featuring an Expres
 
 | Layer | Technology | Details |
 | :--- | :--- | :--- |
-| **Frontend** | React 18, Vite | High-performance single page application with modern component architecture |
-| **Backend** | Node.js (v22+), Express | RESTful API server with centralized middleware, error handling, and routing |
+| **Frontend** | React 18, Vite | Single page application with `/api` dev proxy |
+| **Backend** | Node.js (v22+), Express | RESTful API with Zod validation and centralized error handling |
 | **Database** | PostgreSQL 18.6 | Relational database (`ledgerline_dev` on port 5432) |
-| **Database Access** | `node-postgres` (`pg`) | High-performance connection pool (`pg.Pool`) with parameterized queries |
-| **Validation** | Zod | Runtime schema validation for environment variables and API payloads |
-| **Authentication** | JWT (`jsonwebtoken`), `bcryptjs` | Stateless session tokens and salted password hashing |
-| **Testing** | Jest, Supertest | Comprehensive unit and API integration testing suite |
+| **Database Access** | `node-postgres` (`pg`) | Connection pool (`pg.Pool`) with parameterized SQL queries |
+| **Validation** | Zod | Runtime schema validation for request payloads and environment variables |
+| **Testing** | Jest, Supertest | Automated API integration and route testing |
 
 ---
 
@@ -25,8 +22,8 @@ This repository is organized as a clean full-stack workspace featuring an Expres
 ```text
 LedgerLine/
 ├── .env.example              # Template for root/global environment variables
-├── .gitignore                # Git ignore rules for node_modules, .env, build outputs
-├── package.json              # Root workspace scripts (dev, test, start)
+├── .gitignore                # Protects node_modules, .env secrets, logs, build outputs
+├── package.json              # Root workspace scripts (dev, test, migrate, build)
 ├── README.md                 # Complete project documentation and guide
 ├── PROMPTS.md                # Development prompt history and architectural decisions
 ├── THREATS.md                # STRIDE threat model & financial risk mitigations
@@ -42,10 +39,16 @@ LedgerLine/
 │   │   ├── config/
 │   │   │   ├── db.js         # PostgreSQL connection pool (pg.Pool) configuration
 │   │   │   └── env.js        # Environment variable loader & Zod validation schema
-│   │   └── routes/
-│   │       └── health.js     # Health check endpoint (GET /api/health)
+│   │   ├── routes/
+│   │   │   ├── health.js     # Health check endpoint (GET /api/health)
+│   │   │   └── transfers.js  # Basic money transfer endpoint (POST /api/transfers)
+│   │   └── scripts/
+│   │       └── migrate.js    # Database migration runner script
 │   └── tests/
-│       └── health.test.js    # Supertest integration tests for health endpoints
+│       ├── health.test.js                     # Supertest integration tests for health endpoints
+│       ├── transfers.test.js                  # Supertest tests for basic money transfer endpoint
+│       ├── concurrency.test.js                # Exploratory concurrent transfer test
+│       └── deterministic-concurrency.test.js  # Deterministic barrier synchronization race condition reproduction test
 │
 ├── frontend/                 # React 18 + Vite frontend client
 │   ├── .env.example          # Frontend-specific environment variables template
@@ -55,32 +58,32 @@ LedgerLine/
 │   ├── vite.config.js        # Vite configuration with /api reverse proxy to port 5000
 │   └── src/
 │       ├── main.jsx          # React DOM root render
-│       ├── App.jsx           # Main dashboard component with live health check card
+│       ├── App.jsx           # Dashboard component with live health check card
 │       └── index.css         # Modern typography and layout styling
 │
 └── database/                 # Database schema and migration management
     ├── README.md             # Migration documentation and conventions
     └── migrations/           # Versioned SQL migration scripts (.sql)
+        └── 001_create_accounts_and_transfers.sql
 ```
 
 ---
 
-## 🚀 Getting Started (Beginner-Friendly Guide)
+## 🚀 Getting Started
 
 ### 1. Prerequisites
-- **Node.js**: v20 or v22 installed (Confirm with `node -v`)
+- **Node.js**: v20 or v22 installed (`node -v`)
 - **PostgreSQL**: PostgreSQL 18.6 installed and running locally on port 5432
 - **Database**: Database named `ledgerline_dev` created in PostgreSQL
 
 ### 2. Environment Configuration
-Copy the provided `.env.example` into a new `.env` file inside the `backend` directory:
+Create `backend/.env` from the provided example template:
 
-```bash
-# On Windows PowerShell:
+```powershell
 Copy-Item backend\.env.example backend\.env
 ```
 
-Open `backend\.env` in your editor and set your PostgreSQL password:
+Open `backend\.env` and configure your credentials:
 ```env
 PORT=5000
 NODE_ENV=development
@@ -91,90 +94,132 @@ DB_NAME=ledgerline_dev
 DB_USER=postgres
 DB_PASSWORD=your_actual_postgres_password_here
 
-JWT_SECRET=your_super_secret_jwt_key_at_least_32_characters
+# Generate a secure 32+ character key: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+JWT_SECRET=replace_with_a_secure_random_jwt_secret_at_least_32_characters
 JWT_EXPIRES_IN=24h
 CLIENT_URL=http://localhost:5173
 ```
-> **Security Reminder:** Never commit the `.env` file to git. It is protected by `.gitignore`.
+
+### 3. Run Database Migrations
+Run the version-controlled migration script from the project root:
+```powershell
+npm run migrate:backend
+```
+*(Applies `001_create_accounts_and_transfers.sql` to set up `accounts`, `transfers`, and `schema_migrations`).*
 
 ---
 
 ## 💻 Commands to Run the Project
-
-You can run commands directly from the root workspace or from within each subdirectory.
 
 ### From Root Directory:
 
 | Command | Action |
 | :--- | :--- |
 | `npm run dev:backend` | Starts the Express API server with live reload (`nodemon`) on port 5000 |
-| `npm run dev:frontend` | Starts the Vite React dev server with Hot Module Reloading on port 5173 |
-| `npm run test:backend` | Executes the Jest and Supertest test suites |
+| `npm run dev:frontend` | Starts the Vite React dev server on port 5173 |
+| `npm run test:backend` | Executes the Jest and Supertest test suite |
+| `npm run migrate:backend` | Runs outstanding database migrations |
 | `npm run build:frontend` | Compiles the production React bundle into `frontend/dist` |
 
-### Or Individually:
-
-#### Backend
-```bash
-cd backend
-npm run dev      # Run backend with nodemon live reload
-npm test         # Run backend test suite
-npm start        # Run backend production server
-```
-
-#### Frontend
-```bash
-cd frontend
-npm run dev      # Start React development server at http://localhost:5173
-npm run build    # Build for production
-```
-
 ---
 
-## 🩺 Health Check Endpoint
+## 📡 Verified API Endpoints
 
-The API includes a health check endpoint:
-
-- **Endpoint:** `GET /api/health`
-- **Optional Parameter:** `GET /api/health?db=true` (tests live database connection)
-- **Response Format:**
-```json
-{
-  "status": "healthy",
-  "service": "LedgerLine API",
-  "environment": "development",
-  "uptime": "4.2s",
-  "timestamp": "2026-11-07T10:15:00.000Z",
-  "database": {
-    "status": "untested"
+### 1. Health Check
+* **Endpoint:** `GET /api/health`
+* **Response Status:** `200 OK`
+* **Response:**
+  ```json
+  {
+    "status": "healthy",
+    "service": "LedgerLine API",
+    "environment": "development",
+    "uptime": "4.2s",
+    "timestamp": "2026-11-07T11:40:00.000Z",
+    "database": { "status": "untested" }
   }
-}
-```
+  ```
+
+### 2. Basic Money Transfers (Experiment 1 Baseline)
+* **Endpoint:** `POST /api/transfers`
+* **Context:** In this example, the source account has an initial balance of 100,000 paise (₹1,000.00) and the destination account has an initial balance of 50,000 paise (₹500.00).
+* **Request Body:**
+  ```json
+  {
+    "sourceAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+    "destinationAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
+    "amountPaise": 30000
+  }
+  ```
+* **Success Response (201 Created):**
+  ```json
+  {
+    "message": "Transfer completed successfully",
+    "transfer": {
+      "id": "c2eebc99-9c0b-4ef8-bb6d-6bb9bd380a33",
+      "sourceAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+      "destinationAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
+      "amountPaise": "30000",
+      "status": "completed",
+      "createdAt": "2026-11-07T11:40:00.000Z"
+    },
+    "updatedBalances": {
+      "sourceAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+      "sourceBalancePaise": "70000",
+      "destinationAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
+      "destinationBalancePaise": "80000"
+    }
+  }
+  ```
+* **Error Responses:**
+  * `400 Bad Request`: Input validation failed (negative amount, invalid UUID, same source/destination).
+  * `404 Not Found`: Source or destination account not found.
+  * `422 Unprocessable Entity`: Sender has insufficient funds.
 
 ---
 
-## 🧪 Testing
+## 🧪 Automated Testing
 
-Automated testing is configured using **Jest** and **Supertest**. Tests run without needing to launch a standalone server because `app.js` is isolated from `server.js`.
-
-To run backend tests:
-```bash
+Automated tests are executed using **Jest** and **Supertest**:
+```powershell
 npm run test:backend
 ```
 
+**Test Coverage Status (11 passing tests across 4 suites):**
+- `tests/health.test.js` (3 tests):
+  - `GET /` welcome payload (200)
+  - `GET /api/health` system status (200)
+  - `GET /api/unknown-route` 404 handler (404)
+- `tests/transfers.test.js` (6 tests - with scoped account & transfer cleanup):
+  - `POST /api/transfers` successful fund transfer & balance update (201)
+  - `POST /api/transfers` rejection on insufficient funds (422)
+  - `POST /api/transfers` non-existent source account (404)
+  - `POST /api/transfers` non-existent destination account (404)
+  - `POST /api/transfers` rejection on same source & destination (400)
+  - `POST /api/transfers` rejection on non-positive amounts (400)
+- `tests/concurrency.test.js` (1 test):
+  - Exploratory concurrent transfer test launching two simultaneous requests of 80,000 paise against 100,000 paise available
+- `tests/deterministic-concurrency.test.js` (1 test):
+  - Deterministic barrier test confirming TOCTOU race condition (both transactions read 100,000 paise before either commits, reproducing source overdraft to -60,000 paise)
+
 ---
 
-## 🔒 Security Principles
-- **No Hardcoded Secrets:** All credentials are loaded via validated environment variables.
-- **Threat Modeling:** Read [THREATS.md](file:///d:/LedgerLine/THREATS.md) for domain-specific security rules (double-spending, floating-point rounding, immutability).
-- **Parameterized SQL:** All database interactions in subsequent phases will use `$1, $2` parameterized queries to eliminate SQL injection.
-- **Append-Only Ledger:** Historical financial transactions will never be updated or deleted; adjustments are handled via offsetting entries.
+## ⚠️ Important Implementation Disclaimer
+
+> **Baseline Notice:** The current transfer implementation represents **Experiment 1 (Initial Working Baseline)**. It verifies account existence, checks available balance, deducts from the sender, credits the receiver, and writes a transfer record inside a standard database transaction.
+>
+> However, it **does not yet provide production-grade financial guarantees**:
+> - It does not implement pessimistic row locking (`FOR UPDATE`), making it susceptible to race conditions under concurrent requests.
+> - It does not support idempotency keys (network retries could result in duplicate transfers).
+> - It modifies balances directly rather than maintaining an immutable, append-only double-entry ledger.
+> - Refused transfers roll back and do not record an audit trail.
 
 ---
 
 ## 🗺️ Roadmap
-- [x] **Phase 1: Initial Foundation & Workspace Setup** (Current)
-- [ ] **Phase 2: Database Schema & Migration Runner** (Awaiting approval)
-- [ ] **Phase 3: User Authentication & Account Management**
-- [ ] **Phase 4: Double-Entry Transaction Engine & Invariants**
-- [ ] **Phase 5: Financial Reporting, Audit Logs & Frontend Integration**
+- [x] **Phase 1: Initial Foundation & Workspace Setup**
+- [x] **Phase 2 Baseline: Initial Migration & Basic Money Transfer (Experiment 1)**
+- [ ] **Phase 2 Hardening: Concurrency Protection (`SELECT ... FOR UPDATE`), Idempotency & Audit Trails**
+- [ ] **Phase 3: User Authentication & Role-Based Authorization**
+- [ ] **Phase 4: Full Double-Entry Balanced Ledger Engine**
+- [ ] **Phase 5: Financial Reporting, Running Statements & UI Integration**

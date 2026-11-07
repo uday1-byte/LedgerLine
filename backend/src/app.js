@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const healthRoutes = require('./routes/health');
+const transferRoutes = require('./routes/transfers');
 const env = require('./config/env');
 
 const app = express();
@@ -28,6 +29,7 @@ app.get('/', (req, res) => {
 
 // Mount Routes
 app.use('/api/health', healthRoutes);
+app.use('/api/transfers', transferRoutes);
 
 // 404 Handler for undefined routes
 app.use((req, res, next) => {
