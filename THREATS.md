@@ -259,3 +259,12 @@ The current implementation of `POST /api/transfers` provides an initial working 
     - `ledgerline_app` has `GRANT SELECT, INSERT` on `transfers` and `ledger_entries` (no UPDATE, DELETE, or TRUNCATE).
     - `ledgerline_app` has `REVOKE ALL` on `schema_migrations`.
     - Only `ledgerline_owner` can execute DDL or modify triggers.
+
+### 7.7 Financial Mutation Trust Boundary & Balance-to-Ledger Coupling
+* **Threat:** An administrative script, developer session, or unmitigated SQL injection vulnerability executing directly as `ledgerline_app` performs a direct SQL `UPDATE accounts SET balance_paise = ...`, modifying account balances without creating corresponding double-entry ledger entries.
+* **Architecture & Boundary Analysis:**
+  - `ledgerline_app` requires column-level `UPDATE (balance_paise, updated_at, opening_balance_captured_at)` on `public.accounts` to execute legitimate transfers, reversals, and opening-balance cutovers coordinated by the Express application.
+  - The database-level deferred constraint trigger `trg_verify_transfer_balance` is declared on `public.transfers`. It validates that transfer records are balanced by corresponding `ledger_entries`; it does not guarantee that every account balance mutation is ledger-backed.
+  - **Limitation (Known Residual Risk):** There is no database trigger on `public.accounts` that intercepts direct SQL balance updates or prevents an `UPDATE accounts SET balance_paise = ...` from executing without ledger entries if invoked directly as `ledgerline_app`.
+  - **Trust Boundary:** The Express application is the authoritative security boundary responsible for coupling account balance updates with immutable double-entry ledger entries inside an atomic database transaction.
+  - **Compensating Control:** Discrepancies between stored account balances (`accounts.balance_paise`) and balances reconstructed from historical ledger entries (`ledger_entries`)—accounting for opening-balance entries and compensating reversals—can be detected by periodic audit reconciliation queries.

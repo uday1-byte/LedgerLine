@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { z } = require('zod');
 const { pool } = require('../config/db');
+const { authenticateJWT, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -26,9 +27,9 @@ const reversalSchema = z.object({
 /**
  * @route   POST /api/transfers
  * @desc    Execute an idempotent money transfer between two accounts with double-entry ledger entries
- * @access  Public
+ * @access  Private (account_holder, admin)
  */
-router.post('/', async (req, res, next) => {
+router.post('/', authenticateJWT, requireRole('admin', 'account_holder'), async (req, res, next) => {
   // 1. Validate mandatory Idempotency-Key header
   const idempotencyKey = req.header('Idempotency-Key');
   if (!idempotencyKey || typeof idempotencyKey !== 'string' || idempotencyKey.trim().length === 0) {
@@ -133,8 +134,10 @@ router.post('/', async (req, res, next) => {
     }
 
     // 5. Lock both accounts in deterministic order (ORDER BY id) with SELECT ... FOR UPDATE
+    // Note: Deterministic row locking (ORDER BY id) reduces deadlock risk for transactions locking
+    // the same pair of accounts, but does not guarantee complete system-wide deadlock freedom.
     const accountsResult = await client.query(
-      `SELECT id, account_number, balance_paise
+      `SELECT id, account_number, balance_paise, user_id
        FROM accounts
        WHERE id IN ($1, $2)
        ORDER BY id
@@ -150,6 +153,18 @@ router.post('/', async (req, res, next) => {
         error: 'NotFoundError',
         message: 'Source account not found',
       });
+    }
+
+    // Authorization: Account holders can ONLY transfer from accounts they own.
+    // Unassigned accounts or accounts owned by others return 403 Forbidden.
+    if (req.user.role === 'account_holder') {
+      if (!sourceAccount.user_id || sourceAccount.user_id !== req.user.id) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          error: 'ForbiddenError',
+          message: 'Access denied: You are not authorized to transfer funds from this account',
+        });
+      }
     }
 
     // Verify destination account exists
@@ -285,9 +300,9 @@ router.post('/', async (req, res, next) => {
 /**
  * @route   POST /api/transfers/:id/reversal
  * @desc    Execute a compensating reversal for an existing customer transfer with double-entry ledger entries
- * @access  Public
+ * @access  Private (account_holder, admin)
  */
-router.post('/:id/reversal', async (req, res, next) => {
+router.post('/:id/reversal', authenticateJWT, requireRole('admin', 'account_holder'), async (req, res, next) => {
   // 1. Validate mandatory Idempotency-Key header
   const idempotencyKey = req.header('Idempotency-Key');
   if (!idempotencyKey || typeof idempotencyKey !== 'string' || idempotencyKey.trim().length === 0) {
@@ -452,8 +467,10 @@ router.post('/:id/reversal', async (req, res, next) => {
     const refundAmount = BigInt(originalTransfer.amount_paise);
 
     // 8. Lock both accounts in deterministic order (ORDER BY id)
+    // Note: Deterministic row locking (ORDER BY id) reduces deadlock risk for transactions locking
+    // the same pair of accounts, but does not guarantee complete system-wide deadlock freedom.
     const accountsResult = await client.query(
-      `SELECT id, balance_paise
+      `SELECT id, balance_paise, user_id
        FROM accounts
        WHERE id IN ($1, $2)
        ORDER BY id
@@ -470,6 +487,19 @@ router.post('/:id/reversal', async (req, res, next) => {
         error: 'NotFoundError',
         message: 'One or both accounts associated with the transfer no longer exist',
       });
+    }
+
+    // Authorization: In a reversal, funds are debited from the original destination account.
+    // Account holders can ONLY reverse a transfer if they own the debited account.
+    // Unassigned accounts or accounts owned by others return 403 Forbidden.
+    if (req.user.role === 'account_holder') {
+      if (!debitedAccount.user_id || debitedAccount.user_id !== req.user.id) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          error: 'ForbiddenError',
+          message: 'Access denied: You are not authorized to reverse this transfer: you do not own the debited account',
+        });
+      }
     }
 
     // 9. Solvency Check: The original destination must have sufficient balance to refund the money

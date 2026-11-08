@@ -3,6 +3,7 @@ const { Pool } = require('pg');
 const app = require('../src/app');
 const { pool } = require('../src/config/db');
 const env = require('../src/config/env');
+const { createTestUser } = require('./helpers/auth');
 
 // Privileged migration/table owner pool used strictly to verify that database-level
 // append-only triggers reject mutations even when executed by table owners with UPDATE/DELETE grants.
@@ -29,10 +30,15 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
   let sourceAccountId;
   let destinationAccountId;
   let thirdAccountId;
+  let authToken;
 
   beforeEach(async () => {
-    // Create isolated test accounts
-    const srcRes = await pool.query(
+    // Authenticated admin test user for executing transactions
+    const adminUser = await createTestUser({ role: 'admin' });
+    authToken = adminUser.token;
+
+    // Create isolated test accounts using ownerPool (test fixture setup requires initial balances)
+    const srcRes = await ownerPool.query(
       `INSERT INTO accounts (account_number, balance_paise)
        VALUES ($1, $2)
        RETURNING id, balance_paise`,
@@ -40,7 +46,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     );
     sourceAccountId = srcRes.rows[0].id;
 
-    const dstRes = await pool.query(
+    const dstRes = await ownerPool.query(
       `INSERT INTO accounts (account_number, balance_paise)
        VALUES ($1, $2)
        RETURNING id, balance_paise`,
@@ -48,7 +54,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     );
     destinationAccountId = dstRes.rows[0].id;
 
-    const thirdRes = await pool.query(
+    const thirdRes = await ownerPool.query(
       `INSERT INTO accounts (account_number, balance_paise)
        VALUES ($1, $2)
        RETURNING id, balance_paise`,
@@ -74,6 +80,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     const key = `KEY-1-${Date.now()}-${Math.random()}`;
     const res = await request(app)
       .post('/api/transfers')
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', key)
       .send({
         sourceAccountId,
@@ -100,6 +107,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     const key = `KEY-2-${Date.now()}-${Math.random()}`;
     const res = await request(app)
       .post('/api/transfers')
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', key)
       .send({
         sourceAccountId,
@@ -127,6 +135,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     const key = `KEY-3-${Date.now()}-${Math.random()}`;
     const res = await request(app)
       .post('/api/transfers')
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', key)
       .send({
         sourceAccountId,
@@ -237,6 +246,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     const key = `KEY-6-${Date.now()}-${Math.random()}`;
     const res = await request(app)
       .post('/api/transfers')
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', key)
       .send({
         sourceAccountId,
@@ -280,6 +290,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     const key = `KEY-7-${Date.now()}-${Math.random()}`;
     const res = await request(app)
       .post('/api/transfers')
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', key)
       .send({
         sourceAccountId,
@@ -330,6 +341,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     // First request
     const res1 = await request(app)
       .post('/api/transfers')
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', key)
       .send(payload);
 
@@ -340,6 +352,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     // Second request with identical payload and key
     const res2 = await request(app)
       .post('/api/transfers')
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', key)
       .send(payload);
 
@@ -366,6 +379,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     // Initial request
     const res1 = await request(app)
       .post('/api/transfers')
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', key)
       .send({
         sourceAccountId,
@@ -378,6 +392,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     // Conflicting request: same key, different amount
     const res2 = await request(app)
       .post('/api/transfers')
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', key)
       .send({
         sourceAccountId,
@@ -401,8 +416,8 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
 
     // Dispatch two identical requests concurrently
     const [res1, res2] = await Promise.all([
-      request(app).post('/api/transfers').set('Idempotency-Key', key).send(payload),
-      request(app).post('/api/transfers').set('Idempotency-Key', key).send(payload),
+      request(app).post('/api/transfers').set('Authorization', `Bearer ${authToken}`).set('Idempotency-Key', key).send(payload),
+      request(app).post('/api/transfers').set('Authorization', `Bearer ${authToken}`).set('Idempotency-Key', key).send(payload),
     ]);
 
     // Both should succeed (one initial 201, one replayed 201)
@@ -437,6 +452,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     const txKey = `KEY-11-TX-${Date.now()}-${Math.random()}`;
     const transferRes = await request(app)
       .post('/api/transfers')
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', txKey)
       .send({
         sourceAccountId,
@@ -452,6 +468,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     const revKey = `KEY-11-REV-${Date.now()}-${Math.random()}`;
     const revRes = await request(app)
       .post(`/api/transfers/${originalTransferId}/reversal`)
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', revKey)
       .send({
         reversalReason: 'Customer dispute resolved',
@@ -508,6 +525,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     const txKey = `KEY-12-TX-${Date.now()}-${Math.random()}`;
     const transferRes = await request(app)
       .post('/api/transfers')
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', txKey)
       .send({
         sourceAccountId,
@@ -522,6 +540,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     const revKey1 = `KEY-12-REV1-${Date.now()}-${Math.random()}`;
     const revRes1 = await request(app)
       .post(`/api/transfers/${originalTransferId}/reversal`)
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', revKey1)
       .send({ reversalReason: 'First reversal' });
 
@@ -531,6 +550,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     const revKey2 = `KEY-12-REV2-${Date.now()}-${Math.random()}`;
     const revRes2 = await request(app)
       .post(`/api/transfers/${originalTransferId}/reversal`)
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', revKey2)
       .send({ reversalReason: 'Duplicate reversal attempt' });
 
@@ -613,7 +633,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
 
     // 5. Transactional Cutover Proof: Empirically prove that the cutover mechanism preserves
     // customer balances and models system equity balance faithfully without altering existing database records
-    const client = await pool.connect();
+    const client = await ownerPool.connect();
     try {
       await client.query('BEGIN');
 
@@ -718,6 +738,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     const txKey1 = `KEY-14-TX1-${Date.now()}-${Math.random()}`;
     const tx1Res = await request(app)
       .post('/api/transfers')
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', txKey1)
       .send({
         sourceAccountId,
@@ -733,6 +754,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     const txKey2 = `KEY-14-TX2-${Date.now()}-${Math.random()}`;
     const tx2Res = await request(app)
       .post('/api/transfers')
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', txKey2)
       .send({
         sourceAccountId: destinationAccountId,
@@ -746,6 +768,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
     const revKey = `KEY-14-REV-${Date.now()}-${Math.random()}`;
     const revRes = await request(app)
       .post(`/api/transfers/${originalTransferId}/reversal`)
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', revKey)
       .send({
         reversalReason: 'Attempted reversal on spent funds',
@@ -767,6 +790,7 @@ describe('Phase 4: Double-Entry Ledger, Idempotency & Financial Integrity Tests'
   it('15. transfers without an idempotency key are rejected with HTTP 400', async () => {
     const res = await request(app)
       .post('/api/transfers')
+      .set('Authorization', `Bearer ${authToken}`)
       .send({
         sourceAccountId,
         destinationAccountId,

@@ -1,15 +1,32 @@
 const request = require('supertest');
+const { Pool } = require('pg');
 const app = require('../src/app');
 const { pool } = require('../src/config/db');
+const env = require('../src/config/env');
+const { createTestUser } = require('./helpers/auth');
+
+const ownerPool = new Pool({
+  host: env.DB_HOST,
+  port: env.DB_PORT,
+  database: 'ledgerline_test',
+  user: process.env.MIGRATION_DB_USER || 'ledgerline_owner',
+  password: process.env.MIGRATION_DB_PASSWORD || env.DB_PASSWORD,
+  max: 2,
+});
 
 describe('Experiment 2: Concurrent Transfers Security Test', () => {
   let sourceAccountId;
   let dest1AccountId;
   let dest2AccountId;
+  let authToken;
 
   beforeEach(async () => {
-    // 1. Create a source account with exactly 100,000 paise (₹1,000.00)
-    const srcRes = await pool.query(
+    // Authenticated test user
+    const testUser = await createTestUser({ role: 'admin' });
+    authToken = testUser.token;
+
+    // 1. Create a source account with exactly 100,000 paise (₹1,000.00) using ownerPool
+    const srcRes = await ownerPool.query(
       `INSERT INTO accounts (account_number, balance_paise)
        VALUES ($1, $2)
        RETURNING id, balance_paise`,
@@ -17,8 +34,8 @@ describe('Experiment 2: Concurrent Transfers Security Test', () => {
     );
     sourceAccountId = srcRes.rows[0].id;
 
-    // 2. Create destination account 1 (initial balance: 0)
-    const dst1Res = await pool.query(
+    // 2. Create destination account 1 (initial balance: 0) using ownerPool
+    const dst1Res = await ownerPool.query(
       `INSERT INTO accounts (account_number, balance_paise)
        VALUES ($1, $2)
        RETURNING id, balance_paise`,
@@ -26,8 +43,8 @@ describe('Experiment 2: Concurrent Transfers Security Test', () => {
     );
     dest1AccountId = dst1Res.rows[0].id;
 
-    // 3. Create destination account 2 (initial balance: 0)
-    const dst2Res = await pool.query(
+    // 3. Create destination account 2 (initial balance: 0) using ownerPool
+    const dst2Res = await ownerPool.query(
       `INSERT INTO accounts (account_number, balance_paise)
        VALUES ($1, $2)
        RETURNING id, balance_paise`,
@@ -43,6 +60,7 @@ describe('Experiment 2: Concurrent Transfers Security Test', () => {
 
   afterAll(async () => {
     await pool.end();
+    await ownerPool.end();
   });
 
   it('investigates whether concurrent transfers can overdraw an account', async () => {
@@ -50,6 +68,7 @@ describe('Experiment 2: Concurrent Transfers Security Test', () => {
     // Combined requested: 160,000 paise > 100,000 paise available
     const req1 = request(app)
       .post('/api/transfers')
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', `CONC-KEY-1-${Date.now()}-${Math.random()}`)
       .send({
         sourceAccountId,
@@ -59,6 +78,7 @@ describe('Experiment 2: Concurrent Transfers Security Test', () => {
 
     const req2 = request(app)
       .post('/api/transfers')
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Idempotency-Key', `CONC-KEY-2-${Date.now()}-${Math.random()}`)
       .send({
         sourceAccountId,

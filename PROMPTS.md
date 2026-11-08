@@ -497,3 +497,87 @@ Following the application of Migration 003, 22 of 27 tests passed, and both conc
      - Cutover conservation invariant: $\text{System Equity balance} + \sum (\text{customer accounts with } \texttt{opening\_balance\_captured\_at IS NOT NULL}) \equiv 0\text{ paise}$.
      - Double-entry ledger conservation: $\sum (\text{credits} - \text{debits}) \equiv 0\text{ paise}$ across all `ledger_entries` in the database.
      - Opening balance transfers have balanced debit/credit entries.
+
+
+---
+
+## Phase 5: Authentication & Role-Based Access Control (RBAC) (2026-11-08)
+
+### Summary of Requests & Objectives
+1. **Phase 5 Step 1: Authentication Foundation:**
+   - Establish user identity schema (`public.users`), password hashing (`bcryptjs` with work factor 12), and JWT issuance (`jsonwebtoken`).
+   - Implement `POST /api/auth/register`, `POST /api/auth/login`, and `GET /api/auth/me`.
+   - Implement timing mitigation for email enumeration (`dummyVerifyPassword`).
+   - Ensure dynamic role lookup: token contains only `sub: user.id`; `role` and `is_active` are queried live from `public.users` on every request.
+2. **Phase 5 Step 2: Account Ownership, RBAC, and Administrative Invariants:**
+   - Account ownership linkage: `public.accounts(user_id)` foreign key referencing `public.users(id)`.
+   - Account listing and detail routes (`/api/accounts`, `/api/accounts/:id`): account holders can access only their own assigned accounts; unassigned or other accounts return HTTP 403 Forbidden.
+   - Administrative functions in PostgreSQL: `admin_bootstrap_seed`, `admin_update_user_role`, `admin_set_user_status`, `admin_assign_account_owner`.
+   - Protect critical invariants: last-active-admin protection against demotion or deactivation, account ownership immutability once assigned, system-equity non-assignment, and advisory locking for concurrent membership mutations.
+   - Enforce source account ownership in `POST /api/transfers` and debited account ownership in `POST /api/transfers/:id/reversal` inside the database transaction following `SELECT ... FOR UPDATE`.
+   - Auditor role restriction: strictly read-only; can list and inspect accounts, but mutation endpoints reject auditors with HTTP 403 Forbidden. (User inspection is not implemented).
+   - Target database: strictly `ledgerline_test`; `ledgerline_dev` remains untouched.
+
+### Implementation Summary
+1. **Database Schema & Migrations:**
+   - **Migration 004 (`database/migrations/004_create_users_and_authentication.sql`):**
+     - Created `public.users` (`id`, `username`, `email`, `password_hash`, `role`, `is_active`, timestamps) with role constraint (`admin`, `account_holder`, `auditor`).
+     - Added `user_id UUID REFERENCES public.users(id)` to `public.accounts`.
+     - Created `SECURITY DEFINER` administrative functions with advisory locking.
+     - Updated role grants: `ledgerline_app` granted column-level `INSERT (username, email, password_hash)` and `UPDATE (password_hash, updated_at)` on `users`; `INSERT (account_number)` on `accounts`.
+2. **Authentication & Cryptography:**
+   - `backend/src/utils/password.js`: `validatePasswordStrength`, `hashPassword` (work factor 12), `verifyPassword`, and `dummyVerifyPassword` (dummy bcrypt verification against `DUMMY_HASH` to reduce timing differences and help mitigate email enumeration).
+   - `backend/src/utils/jwt.js`: `generateToken`, `verifyToken`.
+   - `backend/src/middleware/auth.js`: `authenticateJWT` (verifies bearer token and performs live user lookup), `requireRole`, `requireAccountOwnership`.
+   - `backend/src/routes/auth.js`: Registration, login, profile endpoints.
+3. **Account & Administrative Routes:**
+   - `backend/src/routes/accounts.js`: `GET /api/accounts` (filtered to owned accounts for account holders; all accounts for admins/auditors), `GET /api/accounts/:id` (403 if unassigned or non-owned by account holder), `POST /api/accounts` (admin only; unassigned zero-balance creation).
+   - `backend/src/routes/admin.js`: `PATCH /api/admin/users/:id/role`, `PATCH /api/admin/users/:id/status`, `POST /api/admin/accounts/:id/owner`.
+4. **Transfer & Reversal RBAC:**
+   - `backend/src/routes/transfers.js`: Enforced `authenticateJWT` and `requireRole('admin', 'account_holder')`. Inside the pessimistic locking transaction (`SELECT ... FOR UPDATE`), validated `sourceAccount.user_id === req.user.id` for transfers and `debitedAccount.user_id === req.user.id` for reversals. Blocked auditors and unauthorized holders with HTTP 403 Forbidden.
+5. **Admin Bootstrap CLI:**
+   - `backend/src/scripts/seed-admin.js`: CLI script (`npm run seed:admin`) connecting strictly as `ledgerline_owner` using advisory lock `seed_admin_bootstrap` to provision the initial administrator.
+
+### Errors Encountered, Root Cause Analysis, and Corrections
+1. **Migration 004 PL/pgSQL Column Ambiguity (SQLSTATE 42702):**
+   - **Error:** Administrative functions failed when invoked with `column reference "id" is ambiguous` (SQLSTATE `42702`).
+   - **Root Cause:** Functions declared `RETURNS TABLE (id UUID, role VARCHAR, is_active BOOLEAN, ...)`. In PL/pgSQL, return table columns create output variables matching table column names. Unqualified column references in `WHERE id = p_target_user_id` collided with output parameters.
+   - **Resolution:** Authored and executed Migration 005 (`database/migrations/005_fix_admin_function_column_ambiguity.sql`) qualifying all table column references with explicit aliases (`u.id`, `u.role`, `u.is_active`, `a.id`, `a.user_id`) and schema-qualifying all function declarations as `public.*`.
+2. **PL/pgSQL Exception SQLSTATE Expectation (02000 vs P0002):**
+   - **Finding:** Diagnostic script `backend/scratch_verify_functions.js` expected SQLSTATE `02000` for missing record exceptions (`LL002`). In PostgreSQL PL/pgSQL, `RAISE EXCEPTION ... USING ERRCODE = 'no_data_found'` emits SQLSTATE `P0002`.
+   - **Resolution:** Corrected verification script expectations to `P0002`. In `admin.js`, mapped both `P0002` and messages containing `LL002` to HTTP 404, and `23514` / `LL007` to HTTP 422.
+3. **Zod RFC UUID vs System Equity Account UUID:**
+   - **Error:** `POST /api/admin/accounts/:id/owner` returned HTTP 400 when testing system equity account protection because Zod's `z.string().uuid()` requires RFC 4122 version bits (`[1-5]`) and rejected the reserved UUID `00000000-0000-0000-0000-000000000001`.
+   - **Resolution:** Replaced `z.string().uuid()` with a canonical 36-character UUID regex validator `/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/` in `admin.js` and `accounts.js`, allowing the system equity account ID to reach the database function to trigger invariant `LL007` (HTTP 422).
+4. **Deterministic Concurrency Test Client Counting Disruption:**
+   - **Error:** `backend/tests/deterministic-concurrency.test.js` timed out after 20,000 ms during full regression testing.
+   - **Root Cause:** Prior to Phase 5, each transfer request performed exactly one pooled client checkout in the transfer route handler. In Phase 5, `authenticateJWT` queries `public.users` using `pool.query()`, which internally acquires and releases a client before the transfer transaction begins. The test's ordinal client counting (`clientCounter = 1, 2`) in monkey-patched `pool.connect` intercepted authentication clients instead of transfer transaction clients, and re-wrapping pooled clients caused duplicate and out-of-order barrier signaling.
+   - **Resolution:**
+     - Instrumented physical `pg.Client` instances once using a `WeakMap` and `Set` to prevent nested wrapping.
+     - Supported both callback and Promise forms of `pool.connect()` and `client.query()`.
+     - Delegated client identification strictly to observing the account row-locking query (`SELECT ... FOR UPDATE` matching `sourceAccountId`).
+     - Submitting Client 2's competing lock query before releasing Client 1:
+       ```javascript
+       const pendingQuery = orig(text, params);
+       secondClientDispatched = true;
+       releaseFirstClient();
+       const result = await pendingQuery;
+       ```
+     - Asserted that two distinct PostgreSQL client connections executed the competing account-lock query, the second query was submitted before the first transaction was released, the second client subsequently observed the updated balance, `secondClientDispatched === true`, and `barrierTimedOut === false`.
+
+### Final Regression Verification
+The complete backend Jest test suite was executed against `ledgerline_test`:
+```cmd
+set "DB_NAME=ledgerline_test"
+npm.cmd --prefix backend test -- --runInBand
+```
+
+**Final Test Results (Exit Code 0):**
+- `tests/health.test.js`: 3 passed, 0 failed
+- `tests/transfers.test.js`: 7 passed, 0 failed
+- `tests/concurrency.test.js`: 1 passed, 0 failed
+- `tests/deterministic-concurrency.test.js`: 1 passed, 0 failed
+- `tests/ledger.test.js`: 15 passed, 0 failed
+- `tests/auth.test.js`: 13 passed, 0 failed
+- `tests/rbac.test.js`: 26 passed, 0 failed
+- **Total:** 7 test suites passed, 66 tests passed, 0 failed, 0 skipped.

@@ -164,9 +164,156 @@ To set up a fresh database (e.g. `ledgerline_dev` or an isolated test database `
   }
   ```
 
-### 2. Money Transfers (Phase 4 Double-Entry & Idempotent)
+### 2. User Authentication (Phase 5 Step 1)
+
+#### A. User Registration
+* **Endpoint:** `POST /api/auth/register`
+* **Access:** Public
+* **Security Standards:** Passwords hashed with `bcryptjs` (work factor 12). Passwords must be at least 8 characters long and contain at least one letter and one number. Attempted role escalation is ignored or rejected; all registered users default strictly to `account_holder`.
+* **Request Body:**
+  ```json
+  {
+    "username": "alice",
+    "email": "alice@example.com",
+    "password": "SecurePassword123"
+  }
+  ```
+* **Success Response (201 Created):**
+  ```json
+  {
+    "message": "User registered successfully",
+    "user": {
+      "id": "e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a01",
+      "username": "alice",
+      "email": "alice@example.com",
+      "role": "account_holder",
+      "isActive": true,
+      "createdAt": "2026-11-08T14:00:00.000Z"
+    }
+  }
+  ```
+* **Error Responses:**
+  * `400 Bad Request`: Validation failure (weak password, invalid email format, missing fields).
+  * `409 Conflict`: Username or email already registered.
+
+#### B. User Login
+* **Endpoint:** `POST /api/auth/login`
+* **Access:** Public
+* **Timing Mitigation:** Unknown emails trigger dummy bcrypt verification (`dummyVerifyPassword`) against a precomputed work-factor-12 hash, reducing timing differences and helping mitigate email enumeration.
+* **Stateless Minimal JWT:** Issued tokens contain only immutable identity claims (`sub: user.id`). Dynamic attributes (role, active status) are queried live from `public.users` on every authenticated request, ensuring immediate revocation upon role demotion or account deactivation.
+* **Request Body:**
+  ```json
+  {
+    "email": "alice@example.com",
+    "password": "SecurePassword123"
+  }
+  ```
+* **Success Response (200 OK):**
+  ```json
+  {
+    "message": "Login successful",
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "user": {
+      "id": "e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a01",
+      "username": "alice",
+      "email": "alice@example.com",
+      "role": "account_holder",
+      "isActive": true
+    }
+  }
+  ```
+* **Error Responses:**
+  * `401 Unauthorized`: Invalid email or password (safe, generic error message).
+
+#### C. Current User Profile
+* **Endpoint:** `GET /api/auth/me`
+* **Access:** Private (`account_holder`, `admin`, `auditor`)
+* **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
+* **Success Response (200 OK):** Returns the live database user profile. Deleted users are rejected with `401 Unauthorized` (`User no longer exists`), while deactivated users (`is_active = false`) are rejected with `403 Forbidden` (`User account is deactivated`).
+
+---
+
+### 3. Account Inspection & Provisioning (Phase 5 Step 2)
+
+#### A. List Accounts
+* **Endpoint:** `GET /api/accounts`
+* **Access:** Private (`account_holder`, `admin`, `auditor`)
+* **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
+* **Ownership Isolation:**
+  * `account_holder`: Filters rows strictly to accounts assigned to their own user identity (`WHERE user_id = req.user.id AND account_type = 'customer'`). Accounts belonging to other users or unassigned accounts are never returned.
+  * `admin` and `auditor`: Can inspect all system and customer accounts.
+
+#### B. Inspect Single Account
+* **Endpoint:** `GET /api/accounts/:id`
+* **Access:** Private (`account_holder`, `admin`, `auditor`)
+* **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
+* **Authorization Policy:**
+  * `account_holder`: Can only view their own assigned account. Accessing an unassigned account or an account owned by another user returns `403 Forbidden`.
+  * `admin` and `auditor`: Can view any account.
+* **Error Responses:**
+  * `400 Bad Request`: Malformed UUID parameter.
+  * `403 Forbidden`: Access denied (account not owned by caller).
+  * `404 Not Found`: Account does not exist.
+
+#### C. Create Customer Account
+* **Endpoint:** `POST /api/accounts`
+* **Access:** Private (`admin` only)
+* **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
+* **Least-Privilege Enforcement:** Created strictly unassigned (`user_id = NULL`) with zero initial balance (`balance_paise = 0`), complying with the runtime role's column-level grant: `INSERT (account_number)`.
+* **Request Body:**
+  ```json
+  {
+    "accountNumber": "ACC_CUSTOMER_1001"
+  }
+  ```
+* **Success Response (201 Created):** Returns created account object.
+
+---
+
+### 4. Administrative Operations (Phase 5 Step 2)
+
+All administrative endpoints require `admin` role and delegate invariant enforcement to transactional PostgreSQL administrative functions (`SECURITY DEFINER`):
+
+#### A. Update User Role
+* **Endpoint:** `PATCH /api/admin/users/:id/role`
+* **Access:** Private (`admin` only)
+* **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
+* **Function:** `public.admin_update_user_role(target_user_id, new_role)`
+* **Last-Admin Protection:** Serialized via PostgreSQL advisory lock (`admin_membership_lock`). Rejects demoting the last active administrator with HTTP `422 Unprocessable Entity` (`LL007`).
+* **Request Body:** `{ "role": "auditor" }`
+
+#### B. Set User Active Status
+* **Endpoint:** `PATCH /api/admin/users/:id/status`
+* **Access:** Private (`admin` only)
+* **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
+* **Function:** `public.admin_set_user_status(target_user_id, is_active)`
+* **Last-Admin Protection:** Rejects deactivating the last active administrator with HTTP `422 Unprocessable Entity` (`LL007`).
+* **Request Body:** `{ "isActive": false }`
+
+#### C. Assign Account Owner
+* **Endpoint:** `POST /api/admin/accounts/:id/owner`
+* **Access:** Private (`admin` only)
+* **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
+* **Function:** `public.admin_assign_account_owner(account_id, target_user_id)`
+* **Invariants Enforced:**
+  * Account ownership is **immutable once assigned** (reassigning returns `422`).
+  * System equity accounts (`00000000-0000-0000-0000-000000000001`) cannot be assigned to user owners (returns `422`).
+  * Target user must exist and be active (`is_active = true`, returns `422` if inactive).
+  * Missing user or missing account returns HTTP `404 Not Found` (`P0002` / `LL002`).
+* **Request Body:** `{ "userId": "e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a01" }`
+
+---
+
+### 5. Money Transfers (Phase 4 Double-Entry, Idempotent & RBAC-Protected)
 * **Endpoint:** `POST /api/transfers`
-* **Headers:** `Idempotency-Key: <unique-client-key>` (Mandatory)
+* **Access:** Private (`account_holder`, `admin`)
+* **Headers:**
+  * `Authorization: Bearer <jwt-token>` (Mandatory)
+  * `Idempotency-Key: <unique-client-key>` (Mandatory)
+* **Authorization Policy:**
+  * `account_holder`: Enforced inside the database transaction after pessimistic row locking (`SELECT ... FOR UPDATE`). Verifies `sourceAccount.user_id === req.user.id`. Transferring out of unassigned accounts or accounts owned by other users returns `403 Forbidden`.
+  * `admin`: Permitted to execute transfers between accounts.
+  * `auditor`: Strictly read-only compliance role; blocked from initiating transfers (`403 Forbidden`).
 * **Context:** In this example, the source account has an initial balance of 100,000 paise (₹1,000.00) and the destination account has an initial balance of 50,000 paise (₹500.00).
 * **Request Body:**
   ```json
@@ -186,7 +333,7 @@ To set up a fresh database (e.g. `ledgerline_dev` or an isolated test database `
       "destinationAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
       "amountPaise": "30000",
       "status": "completed",
-      "transferType": "transfer",
+      "transferType": "customer_transfer",
       "createdAt": "2026-11-08T12:00:00.000Z"
     },
     "updatedBalances": {
@@ -201,13 +348,23 @@ To set up a fresh database (e.g. `ledgerline_dev` or an isolated test database `
   Returns identical body with HTTP response header `Idempotent-Replayed: true`.
 * **Error Responses:**
   * `400 Bad Request`: Missing `Idempotency-Key` header or input validation failed.
+  * `401 Unauthorized`: Missing, expired, or invalid Bearer token.
+  * `403 Forbidden`: Account holder does not own the funding source account, or caller is an auditor.
   * `404 Not Found`: Source or destination account not found.
   * `409 Conflict`: Re-sending same idempotency key with conflicting request payload parameters.
   * `422 Unprocessable Entity`: Sender has insufficient funds (rolls back transaction and idempotency reservation, allowing retry with same key once funded).
 
-### 3. Transfer Reversals (Phase 4 Compensating Ledger Reversal)
+### 6. Transfer Reversals (Phase 4 Compensating Ledger Reversal & RBAC-Protected)
 * **Endpoint:** `POST /api/transfers/:id/reversal`
-* **Headers:** `Idempotency-Key: <unique-client-key>` (Mandatory)
+* **Access:** Private (`account_holder`, `admin`)
+* **Headers:**
+  * `Authorization: Bearer <jwt-token>` (Mandatory)
+  * `Idempotency-Key: <unique-client-key>` (Mandatory)
+* **Authorization Policy:**
+  * A reversal debits funds from the original recipient and returns them to the original sender.
+  * `account_holder`: Enforced inside the database transaction after pessimistic row locking. Verifies that the caller owns the *debited* account (`debitedAccount.user_id === req.user.id`). An account holder cannot unilaterally claw back money they previously sent to another user (`403 Forbidden`).
+  * `admin`: Permitted to execute reversals.
+  * `auditor`: Strictly read-only compliance role; blocked from initiating reversals (`403 Forbidden`).
 * **Audit & Immutability Guarantee:** The original completed transfer record is **never modified or updated**. Instead, an explicit compensating transfer record (`transfer_type = 'reversal'`) and dual compensating ledger entries are created.
 * **Reversal Lookup Pattern:** To verify whether a completed transfer has been reversed, applications and auditors query:
   ```sql
@@ -246,26 +403,39 @@ To set up a fresh database (e.g. `ledgerline_dev` or an isolated test database `
   ```
 * **Error Responses:**
   * `400 Bad Request`: Missing `Idempotency-Key` header.
+  * `401 Unauthorized`: Missing, expired, or invalid Bearer token.
+  * `403 Forbidden`: Account holder does not own the debited destination account, or caller is an auditor.
   * `404 Not Found`: Original transfer not found.
   * `409 Conflict`: Transfer has already been reversed (enforced by partial unique index `idx_transfers_unique_reversal`).
-  * `422 Unprocessable Entity`: Destination account has insufficient funds to reverse the transfer.
+  * `422 Unprocessable Entity`: Debited account has insufficient funds to reverse the transfer.
 
 ---
 
 ## 🔒 Database Roles & Security Architecture
 
+### A. Database Roles (Least Privilege)
 LedgerLine uses a simplified, least-privilege two-role architecture (`database/provision_roles.sql`):
 
 1. **`ledgerline_owner` (Migration & Schema Owner):**
-   - Owns the `public` schema and all tables (`accounts`, `transfers`, `ledger_entries`, `idempotency_keys`, `schema_migrations`).
-   - Used exclusively to run migrations (`npm run migrate:backend`).
+   - Owns the `public` schema and all tables (`users`, `accounts`, `transfers`, `ledger_entries`, `idempotency_keys`, `schema_migrations`).
+   - Owns all `SECURITY DEFINER` administrative functions.
+   - Used exclusively to run migrations (`npm run migrate:backend`) and initial admin bootstrap (`npm run seed:admin`).
    - Not used to handle normal application HTTP traffic.
-2. **`ledgerline_app` (Restricted Application Role):**
+2. **`ledgerline_app` (Restricted Runtime Application Role):**
    - Used by the Node.js Express server to handle application traffic.
    - **No Table Ownership:** Cannot alter schemas or disable database triggers.
    - **No Truncate Privileges:** Cannot truncate any financial tables.
    - **Strict Append-Only Enforcement:** Granted only `SELECT, INSERT` on `transfers` and `ledger_entries` (no UPDATE or DELETE privileges).
-   - Attempted UPDATE or DELETE operations are blocked both by permission grants and by database triggers (`LL007`). There are no session-level backdoors.
+   - **Column-Level Privileges on Accounts:** Granted `SELECT`, column-level `INSERT (account_number)`, and column-level `UPDATE (balance_paise, updated_at, opening_balance_captured_at)`. Cannot directly alter account ownership (`user_id`).
+   - **Column-Level Privileges on Users:** Granted `SELECT`, column-level `INSERT (username, email, password_hash)`, and column-level `UPDATE (password_hash, updated_at)`. Cannot directly alter user roles (`role`) or active status (`is_active`).
+   - **Accounts Privileges & Trust Boundary:** The Express application coordinates balance updates and ledger entries within atomic transactions. Note that while the deferred database constraint trigger validates that ledger entries associated with transfer records are balanced, direct SQL balance updates are not blocked by an accounts-level trigger.
+   - Attempted UPDATE or DELETE operations on ledger entries are blocked both by permission grants and by database triggers (`LL007`). There are no session-level backdoors.
+
+### B. Application Identity & Access Roles (RBAC)
+LedgerLine defines three distinct application roles stored in `public.users(role)`:
+1. **`admin`:** Full administrative control. Can create unassigned customer accounts, assign account owners, update user roles, and activate/deactivate users via transactional `SECURITY DEFINER` functions. Can also initiate transfers and reversals across accounts. Protected against demoting or deactivating the last active administrator.
+2. **`account_holder`:** Standard banking client. Can list and inspect only their own assigned accounts. Can transfer funds only from accounts they personally own. Can initiate reversals only when they own the debited account. Unassigned or non-owned account operations are rejected with `403 Forbidden`.
+3. **`auditor`:** Compliance and audit officer. Strictly read-only access. Can list and inspect all accounts across the system, but is blocked from executing any mutating transfer, reversal, or account provisioning endpoint (`403 Forbidden`). (There is currently no user-inspection endpoint implemented).
 
 ---
 
@@ -278,30 +448,17 @@ npm run test:backend
 
 **Test Safety & Isolation:**
 - Tests run against an isolated test database (e.g. `ledgerline_test`) and never against the development database (`ledgerline_dev`).
-- Each test generates uniquely keyed account records (`TEST-SRC-...`, `CONC-SRC-...`, `DET-SRC-...`, `LEDGER-SRC-...`).
-- The database contains no test cleanup bypasses. Between complete test suite runs, test databases are reset via test runner schema recreation or test-level truncation.
+- Each test generates uniquely keyed account records (`TEST-SRC-...`, `CONC-SRC-...`, `DET-SRC-...`, `LEDGER-SRC-...`, `RBAC-...`).
+- The database contains no test cleanup bypasses. Real application requests connect through `ledgerline_app`. Privileged fixtures strictly use `ownerPool` (`ledgerline_owner`) for test setup.
 
-**Test Suites:**
-- `tests/health.test.js`: Health check endpoints and 404 routing.
-- `tests/transfers.test.js`: Mandatory idempotency key validation, balance updates, debit/credit ledger verification, insufficient funds rejection, and input validations.
-- `tests/concurrency.test.js`: Concurrency transfer tests.
-- `tests/deterministic-concurrency.test.js`: Barrier synchronization race condition tests proving pessimistic row-locking serialization.
-- `tests/ledger.test.js`: 15 comprehensive automated financial integrity proofs:
-  1. Exactly two ledger entries per transfer (1 debit, 1 credit).
-  2. Debit and credit amounts equal transfer amount.
-  3. Correct account references and running balances.
-  4. Incomplete ledger transactions cannot commit (constraint trigger blocks).
-  5. Unbalanced ledger transactions cannot commit (constraint trigger blocks).
-  6. Direct `UPDATE` on `ledger_entries` rejected by immutability trigger (`LL007`).
-  7. Direct `DELETE` on `ledger_entries` rejected by immutability trigger (`LL007`).
-  8. Idempotent re-sending returns cached response with `Idempotent-Replayed: true`.
-  9. Conflicting payloads with same idempotency key return HTTP 409 Conflict.
-  10. Concurrent requests with same key create only one transfer.
-  11. Compensating reversals restore balances and generate dual compensating ledger entries.
-  12. Duplicate reversals rejected (partial unique index & business checks).
-  13. Opening balances preserve customer balances and satisfy zero-sum equilibrium.
-  14. Reversal rejected with HTTP 422 if recipient spent funds.
-  15. Missing `Idempotency-Key` header rejected with HTTP 400.
+**Test Suites (66 automated tests across 7 suites):**
+1. `tests/health.test.js` (3 tests): Health check endpoints and 404 routing.
+2. `tests/transfers.test.js` (7 tests): Mandatory idempotency key validation, balance updates, debit/credit ledger verification, insufficient funds rejection, and input validations.
+3. `tests/concurrency.test.js` (1 test): Live race condition test demonstrating overdraft prevention under concurrent requests.
+4. `tests/deterministic-concurrency.test.js` (1 test): Deterministic concurrency test verifying that two distinct PostgreSQL clients execute competing account-lock queries, the second query is submitted before the first transaction is released, and the second client subsequently observes the updated balance.
+5. `tests/ledger.test.js` (15 tests): Full double-entry balanced ledger verification, immutability triggers, opening balance zero-sum cutover, and compensating reversals.
+6. `tests/auth.test.js` (13 tests): Authentication foundation, bcrypt work factor 12 hashing, timing-attack prevention, JWT issuance and verification, dynamic database role reflection, and user deactivation enforcement.
+7. `tests/rbac.test.js` (26 tests): Account ownership isolation, IDOR prevention, auditor read-only restrictions, admin creation/assignment/role/status operations, last-active-admin protection, concurrent mutual demotion race protection, ownership immutability, and system equity protection.
 
 ---
 
@@ -310,5 +467,5 @@ npm run test:backend
 - [x] **Phase 2 Baseline: Initial Migration & Basic Money Transfer (Experiment 1)**
 - [x] **Phase 2 Hardening & Phase 3: Concurrency Protection (`SELECT ... FOR UPDATE`), Row-Level Serialization & Regression Proof**
 - [x] **Phase 4: Full Double-Entry Balanced Ledger Engine, Append-Only Triggers, Idempotency & Reversals**
-- [ ] **Phase 5: User Authentication & Role-Based Authorization**
+- [x] **Phase 5: User Authentication & Role-Based Authorization**
 - [ ] **Phase 6: Financial Reporting, Running Statements & UI Integration**

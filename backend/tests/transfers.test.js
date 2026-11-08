@@ -1,14 +1,31 @@
 const request = require('supertest');
+const { Pool } = require('pg');
 const app = require('../src/app');
 const { pool } = require('../src/config/db');
+const env = require('../src/config/env');
+const { createTestUser } = require('./helpers/auth');
+
+const ownerPool = new Pool({
+  host: env.DB_HOST,
+  port: env.DB_PORT,
+  database: 'ledgerline_test',
+  user: process.env.MIGRATION_DB_USER || 'ledgerline_owner',
+  password: process.env.MIGRATION_DB_PASSWORD || env.DB_PASSWORD,
+  max: 2,
+});
 
 describe('POST /api/transfers - Basic Transfers (Experiment 1 & Phase 4)', () => {
   let sourceAccountId;
   let destinationAccountId;
+  let authToken;
 
   beforeEach(async () => {
-    // Create fresh test accounts
-    const sourceRes = await pool.query(
+    // Create an authenticated test user
+    const testUser = await createTestUser({ role: 'admin' });
+    authToken = testUser.token;
+
+    // Create fresh test accounts using ownerPool (test fixture setup requires initial balances)
+    const sourceRes = await ownerPool.query(
       `INSERT INTO accounts (account_number, balance_paise)
        VALUES ($1, $2)
        RETURNING id, balance_paise`,
@@ -16,7 +33,7 @@ describe('POST /api/transfers - Basic Transfers (Experiment 1 & Phase 4)', () =>
     );
     sourceAccountId = sourceRes.rows[0].id;
 
-    const destRes = await pool.query(
+    const destRes = await ownerPool.query(
       `INSERT INTO accounts (account_number, balance_paise)
        VALUES ($1, $2)
        RETURNING id, balance_paise`,
@@ -32,12 +49,14 @@ describe('POST /api/transfers - Basic Transfers (Experiment 1 & Phase 4)', () =>
 
   afterAll(async () => {
     await pool.end();
+    await ownerPool.end();
   });
 
   describe('Mandatory Idempotency-Key Header', () => {
     it('should return 400 when Idempotency-Key header is missing', async () => {
       const res = await request(app)
         .post('/api/transfers')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({
           sourceAccountId,
           destinationAccountId,
@@ -60,6 +79,7 @@ describe('POST /api/transfers - Basic Transfers (Experiment 1 & Phase 4)', () =>
 
       const res = await request(app)
         .post('/api/transfers')
+        .set('Authorization', `Bearer ${authToken}`)
         .set('Idempotency-Key', `TX-KEY-${Date.now()}-${Math.random()}`)
         .send(transferPayload);
 
@@ -119,6 +139,7 @@ describe('POST /api/transfers - Basic Transfers (Experiment 1 & Phase 4)', () =>
 
       const res = await request(app)
         .post('/api/transfers')
+        .set('Authorization', `Bearer ${authToken}`)
         .set('Idempotency-Key', `TX-KEY-${Date.now()}-${Math.random()}`)
         .send(transferPayload);
 
@@ -149,6 +170,7 @@ describe('POST /api/transfers - Basic Transfers (Experiment 1 & Phase 4)', () =>
       const randomUuid = '00000000-0000-0000-0000-000000000000';
       const res = await request(app)
         .post('/api/transfers')
+        .set('Authorization', `Bearer ${authToken}`)
         .set('Idempotency-Key', `TX-KEY-${Date.now()}-${Math.random()}`)
         .send({
           sourceAccountId: randomUuid,
@@ -165,6 +187,7 @@ describe('POST /api/transfers - Basic Transfers (Experiment 1 & Phase 4)', () =>
       const randomUuid = '00000000-0000-0000-0000-000000000000';
       const res = await request(app)
         .post('/api/transfers')
+        .set('Authorization', `Bearer ${authToken}`)
         .set('Idempotency-Key', `TX-KEY-${Date.now()}-${Math.random()}`)
         .send({
           sourceAccountId,
@@ -180,6 +203,7 @@ describe('POST /api/transfers - Basic Transfers (Experiment 1 & Phase 4)', () =>
     it('should return 400 when transferring to the same account', async () => {
       const res = await request(app)
         .post('/api/transfers')
+        .set('Authorization', `Bearer ${authToken}`)
         .set('Idempotency-Key', `TX-KEY-${Date.now()}-${Math.random()}`)
         .send({
           sourceAccountId,
@@ -194,6 +218,7 @@ describe('POST /api/transfers - Basic Transfers (Experiment 1 & Phase 4)', () =>
     it('should return 400 when amount is zero or negative', async () => {
       const res = await request(app)
         .post('/api/transfers')
+        .set('Authorization', `Bearer ${authToken}`)
         .set('Idempotency-Key', `TX-KEY-${Date.now()}-${Math.random()}`)
         .send({
           sourceAccountId,

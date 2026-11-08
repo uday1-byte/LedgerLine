@@ -71,7 +71,20 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'accounts') THEN
         ALTER TABLE public.accounts OWNER TO ledgerline_owner;
         REVOKE ALL ON TABLE public.accounts FROM PUBLIC;
-        GRANT SELECT, INSERT, UPDATE ON TABLE public.accounts TO ledgerline_app;
+        REVOKE ALL ON TABLE public.accounts FROM ledgerline_app;
+        GRANT SELECT ON TABLE public.accounts TO ledgerline_app;
+        GRANT INSERT (account_number) ON TABLE public.accounts TO ledgerline_app;
+        GRANT UPDATE (balance_paise, updated_at, opening_balance_captured_at) ON TABLE public.accounts TO ledgerline_app;
+    END IF;
+
+    -- users
+    IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'users') THEN
+        ALTER TABLE public.users OWNER TO ledgerline_owner;
+        REVOKE ALL ON TABLE public.users FROM PUBLIC;
+        REVOKE ALL ON TABLE public.users FROM ledgerline_app;
+        GRANT SELECT ON TABLE public.users TO ledgerline_app;
+        GRANT INSERT (username, email, password_hash) ON TABLE public.users TO ledgerline_app;
+        GRANT UPDATE (password_hash, updated_at) ON TABLE public.users TO ledgerline_app;
     END IF;
 
     -- transfers

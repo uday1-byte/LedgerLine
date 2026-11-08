@@ -23,6 +23,9 @@ const envSchema = z.object({
   DATABASE_URL: z.string().optional(),
   JWT_SECRET: z.string().default('default_dev_secret_change_in_production'),
   JWT_EXPIRES_IN: z.string().default('24h'),
+  ADMIN_USERNAME: z.string().optional(),
+  ADMIN_EMAIL: z.string().optional(),
+  ADMIN_PASSWORD: z.string().optional(),
   CLIENT_URL: z.string().default('http://localhost:5173'),
 });
 

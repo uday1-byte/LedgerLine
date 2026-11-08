@@ -27,8 +27,20 @@
  */
 
 const http = require('http');
+const { Pool } = require('pg');
 const app = require('../src/app');
 const { pool } = require('../src/config/db');
+const env = require('../src/config/env');
+const { createTestUser } = require('./helpers/auth');
+
+const ownerPool = new Pool({
+  host: env.DB_HOST,
+  port: env.DB_PORT,
+  database: 'ledgerline_test',
+  user: process.env.MIGRATION_DB_USER || 'ledgerline_owner',
+  password: process.env.MIGRATION_DB_PASSWORD || env.DB_PASSWORD,
+  max: 2,
+});
 
 jest.setTimeout(20000);
 
@@ -78,6 +90,7 @@ afterAll(async () => {
   }
   await new Promise((resolve) => server.close(resolve));
   await pool.end();
+  await ownerPool.end();
 }, 15000);
 
 // ─── Test suite ────────────────────────────────────────────────────────────────
@@ -86,24 +99,28 @@ describe('Phase 3 Concurrency Hardening: Deterministic Regression Test', () => {
   let dest1AccountId;
   let dest2AccountId;
   let originalConnect;
+  let authToken;
 
   // ── Account setup ────────────────────────────────────────────────────────────
   beforeEach(async () => {
-    const srcRes = await pool.query(
+    const testUser = await createTestUser({ role: 'admin' });
+    authToken = testUser.token;
+
+    const srcRes = await ownerPool.query(
       `INSERT INTO accounts (account_number, balance_paise) VALUES ($1, $2) RETURNING id`,
       [`DET-SRC-${Date.now()}`, 100000]
     );
     sourceAccountId = srcRes.rows[0].id;
     await new Promise((r) => setTimeout(r, 2));
 
-    const dst1Res = await pool.query(
+    const dst1Res = await ownerPool.query(
       `INSERT INTO accounts (account_number, balance_paise) VALUES ($1, $2) RETURNING id`,
       [`DET-DST1-${Date.now()}`, 0]
     );
     dest1AccountId = dst1Res.rows[0].id;
     await new Promise((r) => setTimeout(r, 2));
 
-    const dst2Res = await pool.query(
+    const dst2Res = await ownerPool.query(
       `INSERT INTO accounts (account_number, balance_paise) VALUES ($1, $2) RETURNING id`,
       [`DET-DST2-${Date.now()}`, 0]
     );
@@ -122,13 +139,16 @@ describe('Phase 3 Concurrency Hardening: Deterministic Regression Test', () => {
   // ── Main experiment ──────────────────────────────────────────────────────────
   it('prevents overdraft by serializing concurrent transfers via SELECT ... FOR UPDATE', async () => {
     const observedSourceReads = [];
-    const wrappedClients = [];
+    const wrappedClientsSet = new Set();
+    const originalQueryMap = new WeakMap();
+    const txnClientMap = new Map(); // Maps pg.Client instance -> txnClientId (1 or 2)
+
     let firstClientSelectFinished = false;
     let secondClientDispatched = false;
     let barrierTimedOut = false;
     let releaseFirstClient;
     let barrierTimeoutHandle;
-    let clientCounter = 0;
+    let txnClientCounter = 0;
 
     const secondClientDispatchedPromise = new Promise((resolve) => {
       releaseFirstClient = () => {
@@ -145,16 +165,28 @@ describe('Phase 3 Concurrency Hardening: Deterministic Regression Test', () => {
       releaseFirstClient();
     }, 3000);
 
-    // ── Instrument pool.connect ──────────────────────────────────────────────────
-    pool.connect = async () => {
-      const client = await originalConnect();
-      const clientId = ++clientCounter;
+    // Helper: Instrument a pg.Client instance exactly once across pool reuses
+    function instrumentClient(client) {
+      if (!client || originalQueryMap.has(client)) {
+        return client;
+      }
+
       const originalQuery = client.query.bind(client);
+      originalQueryMap.set(client, originalQuery);
+      wrappedClientsSet.add(client);
 
-      wrappedClients.push({ clientId, client, originalQuery });
+      // Support both Promise-based and callback-based query invocations.
+      // The application codebase (transfers.js) executes transactions strictly using Promise/await.
+      // Any callback-based query is passed directly to node-postgres without interception.
+      client.query = function (text, params, callback) {
+        const orig = originalQueryMap.get(client);
 
-      client.query = async (text, params) => {
-        // Intercept: locking SELECT on accounts containing sourceAccountId
+        // If a callback is provided (either as 2nd or 3rd argument), pass directly to node-postgres
+        if (typeof callback === 'function' || typeof params === 'function') {
+          return orig(text, params, callback);
+        }
+
+        // Intercept: locking SELECT on accounts containing sourceAccountId (Promise/await only)
         const isAccountsLockSelect =
           typeof text === 'string' &&
           text.includes('SELECT') &&
@@ -164,41 +196,67 @@ describe('Phase 3 Concurrency Hardening: Deterministic Regression Test', () => {
           params.includes(sourceAccountId);
 
         if (isAccountsLockSelect) {
-          if (!firstClientSelectFinished) {
-            // First client to arrive executes SELECT ... FOR UPDATE to acquire row lock
-            firstClientSelectFinished = true;
-            const result = await originalQuery(text, params);
-            const srcRow = result.rows.find((r) => r.id === sourceAccountId);
-            observedSourceReads.push({
-              clientId,
-              order: 1,
-              balance: srcRow.balance_paise.toString(),
-            });
-
-            // Pause Client 1 holding lock until Client 2 has dispatched its SELECT ... FOR UPDATE
-            await secondClientDispatchedPromise;
-            return result;
-          } else {
-            // Second client arrives and signals it is about to request the lock
-            secondClientDispatched = true;
-            releaseFirstClient();
-
-            // Client 2 query blocks in PostgreSQL until Client 1 commits
-            const result = await originalQuery(text, params);
-            const srcRow = result.rows.find((r) => r.id === sourceAccountId);
-            observedSourceReads.push({
-              clientId,
-              order: 2,
-              balance: srcRow.balance_paise.toString(),
-            });
-            return result;
+          // Register transfer transaction client only upon observing the account-lock query
+          if (!txnClientMap.has(client)) {
+            txnClientMap.set(client, ++txnClientCounter);
           }
+          const txnClientId = txnClientMap.get(client);
+
+          return (async () => {
+            if (!firstClientSelectFinished) {
+              // Client 1: acquires row lock, reads balance, and holds open transaction
+              firstClientSelectFinished = true;
+              const result = await orig(text, params);
+              const srcRow = result.rows.find((r) => r.id === sourceAccountId);
+              observedSourceReads.push({
+                clientId: txnClientId,
+                order: 1,
+                balance: srcRow.balance_paise.toString(),
+              });
+
+              // Pause Client 1 holding lock until Client 2 dispatches its competing query
+              await secondClientDispatchedPromise;
+              return result;
+            } else {
+              // Submit Client 2's competing query before releasing Client 1.
+              const pendingQuery = orig(text, params);
+              secondClientDispatched = true;
+              releaseFirstClient();
+
+              // Client 2 blocks at PostgreSQL engine level until Client 1 commits
+              const result = await pendingQuery;
+              const srcRow = result.rows.find((r) => r.id === sourceAccountId);
+              observedSourceReads.push({
+                clientId: txnClientId,
+                order: 2,
+                balance: srcRow.balance_paise.toString(),
+              });
+              return result;
+            }
+          })();
         }
 
-        return originalQuery(text, params);
+        // Authentication queries against public.users and non-locking queries pass through untouched
+        return orig(text, params);
       };
 
       return client;
+    }
+
+    // ── Instrument pool.connect supporting both Promise and callback forms ────────
+    pool.connect = (callback) => {
+      if (typeof callback === 'function') {
+        return originalConnect((err, client, release) => {
+          if (err) return callback(err);
+          instrumentClient(client);
+          return callback(null, client, release);
+        });
+      }
+
+      return originalConnect().then((client) => {
+        instrumentClient(client);
+        return client;
+      });
     };
 
     // ── Launch two concurrent transfer requests over real TCP ────────────────────
@@ -210,6 +268,7 @@ describe('Phase 3 Concurrency Hardening: Deterministic Regression Test', () => {
           destinationAccountId: dest1AccountId,
           amountPaise: 80000,
         }, {
+          'Authorization': `Bearer ${authToken}`,
           'Idempotency-Key': `DET-KEY-1-${Date.now()}-${Math.random()}`,
         }),
         httpPost(serverPort, '/api/transfers', {
@@ -217,6 +276,7 @@ describe('Phase 3 Concurrency Hardening: Deterministic Regression Test', () => {
           destinationAccountId: dest2AccountId,
           amountPaise: 80000,
         }, {
+          'Authorization': `Bearer ${authToken}`,
           'Idempotency-Key': `DET-KEY-2-${Date.now()}-${Math.random()}`,
         }),
       ]);
@@ -228,8 +288,11 @@ describe('Phase 3 Concurrency Hardening: Deterministic Regression Test', () => {
         clearTimeout(barrierTimeoutHandle);
         barrierTimeoutHandle = undefined;
       }
-      for (const { client, originalQuery } of wrappedClients) {
-        client.query = originalQuery;
+      for (const client of wrappedClientsSet) {
+        const orig = originalQueryMap.get(client);
+        if (orig) {
+          client.query = orig;
+        }
       }
     }
 
@@ -274,8 +337,11 @@ describe('Phase 3 Concurrency Hardening: Deterministic Regression Test', () => {
 
     // 2. Both reads were captured through two distinct PostgreSQL connections
     expect(observedSourceReads.length).toBe(2);
+    expect(txnClientMap.size).toBe(2);
     const distinctClients = new Set(observedSourceReads.map((r) => r.clientId));
     expect(distinctClients.size).toBe(2);
+    const clientInstances = [...txnClientMap.keys()];
+    expect(clientInstances[0]).not.toBe(clientInstances[1]);
 
     // 3. Client 1 saw initial balance 100,000; Client 2 saw updated balance 20,000
     expect(observedSourceReads[0].balance).toBe('100000');
