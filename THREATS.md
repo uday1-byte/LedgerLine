@@ -68,7 +68,7 @@ The current implementation of `POST /api/transfers` provides an initial working 
 
 | Risk Area | Current Status | Technical Root Cause (Code Review) | Potential Financial Consequence |
 | :--- | :--- | :--- | :--- |
-| **Concurrent Overdraft / Double-Spending** | **⚠️ EMPIRICALLY CONFIRMED VULNERABILITY** (Reproduced in Experiment 2B on 2026-11-07; deterministic barrier test; overdraft of -60,000 paise confirmed in PostgreSQL; both requests returned HTTP 201) | Read query uses `SELECT ... FROM accounts WHERE id = $1` without pessimistic locking (`FOR UPDATE`) and `UPDATE` lacks `AND balance_paise >= $1`. Two simultaneous transactions both read balance = 100,000, both passed the in-process check (100,000 ≥ 80,000), and both committed `UPDATE balance_paise = balance_paise - 80000`. The source account reached -60,000 paise. | A source account with ₹1,000.00 was depleted to -₹600.00, losing ₹600.00 of institutional funds. At scale, an attacker with control over request timing could drain accounts below zero. |
+| **Concurrent Overdraft / Double-Spending** | **✅ MITIGATED & VERIFIED (2026-11-08)** (Historically confirmed in Experiment 2B with -60,000 paise overdraft; mitigated via `SELECT ... FOR UPDATE` with deterministic lock ordering `ORDER BY id` and conditional deduction guard `AND balance_paise >= $1`. Verified by deterministic regression test: HTTP [201, 422], final source balance 20,000 paise, zero overdraft). | **Historical root cause (fixed):** Read query previously used non-locking `SELECT` and unconditional `UPDATE`. **Mitigation applied:** Both accounts are locked in canonical order (`WHERE id IN ($1, $2) ORDER BY id FOR UPDATE`), serializing concurrent transactions at the database engine level. The deduction uses conditional `WHERE id = $2 AND balance_paise >= $1` with `rowCount` check. | **Historical Risk:** Source account was depleted to -₹600.00 (-60,000 paise). **Current Status:** Overdraft is physically prevented; the second concurrent transfer is blocked by PostgreSQL until the first commits, reads the updated balance (20,000 paise), fails the balance check, and is rejected with HTTP 422. |
 | **Missing Idempotency Protection** | **Unconfirmed Risk Under Investigation** (Design gap: no idempotency key support) | `POST /api/transfers` does not accept or track an `Idempotency-Key` header. | If an HTTP response drops due to network timeout and the client retries, the transfer executes twice, deducting double the funds. |
 | **Mutable Balances (No Double-Entry Ledger)** | **Architectural Risk (Design Gap)** | Balances are directly updated on the `accounts` table via `UPDATE accounts SET balance_paise = ...` rather than derived from an append-only ledger of debit and credit entries. | A failure or database discrepancy cannot be mathematically audited or reconstructed from historical entries. |
 | **Silent Refusal / No Audit Trail** | **Identified Feature Gap** | Insufficient funds errors return HTTP 422 and execute `ROLLBACK`. No record of the refused attempt is written. | Fraudulent transfer attempts or unauthorized brute-force attempts leave no trace for compliance or security monitoring. |
@@ -128,6 +128,57 @@ The current implementation of `POST /api/transfers` provides an initial working 
   - The absence of `SELECT ... FOR UPDATE` allowed both transactions to read the same row concurrently without blocking.
   - The absence of a conditional `WHERE balance_paise >= $1` on the UPDATE allowed both deductions to commit regardless of intermediate state.
 
-* **Fix Required (not yet implemented — awaiting user approval):**
-  - Add `SELECT ... FOR UPDATE` to the source-account query to serialize concurrent transactions at the row lock level.
-  - Optionally add `AND balance_paise >= $1` to the UPDATE as a defence-in-depth guard.
+* **Fix Implemented & Empirically Verified (2026-11-08):**
+  - Added `SELECT ... FOR UPDATE` with canonical lock ordering (`ORDER BY id`) on both accounts.
+  - Added conditional deduction guard `AND balance_paise >= $1` with strict `rowCount` check.
+  - Verified by deterministic regression test (Section 6.3).
+
+### 6.3 Phase 3 Hardening & Concurrency Mitigation (2026-11-08)
+
+* **Test Executed:** `npx.cmd jest backend/tests/deterministic-concurrency.test.js --runInBand --verbose`
+* **Test Synchronization Strategy:**
+  - Client #1 acquires the row lock via `SELECT ... FOR UPDATE` on `sourceAccountId`.
+  - Client #1 pauses inside its transaction, holding the lock open.
+  - Client #2 dispatches its concurrent `SELECT ... FOR UPDATE`, contending for the same locked row.
+  - PostgreSQL automatically blocks Client #2 at the database engine level until Client #1 commits.
+  - Client #1 executes deduction (80,000 paise), credits destination 1, and commits.
+  - Upon Client #1's commit, PostgreSQL unblocks Client #2, which re-evaluates the updated committed row, reads the new balance (`20,000` paise), finds `20,000 < 80,000`, rolls back, and returns HTTP 422 `InsufficientFundsError`.
+* **Empirical Observations:**
+  - Barrier Timed Out: **NO — Both requests synchronized**
+  - Second Client Dispatched: **YES — Contended for row lock in PostgreSQL**
+  - Distinct PostgreSQL Client IDs: **1, 2** (two separate connections verified)
+  - Observed Source Reads: `[{"clientId":1,"order":1,"balance":"100000"},{"clientId":2,"order":2,"balance":"20000"}]`
+  - Request 1 HTTP Status: **201 Created**
+  - Request 2 HTTP Status: **422 Unprocessable Entity**
+  - Final Source Balance: **20000 paise** (₹200.00 — strictly positive, zero overdraft)
+  - Final Dest 1 Balance: **80000 paise** (received funds)
+  - Final Dest 2 Balance: **0 paise** (rejected, untouched)
+  - Total Money in System: **100000 paise** (exact conservation preserved)
+  - Completed Transfers: **1**
+  - Is Source Overdrawn: **NO — PROTECTED**
+  - Jest result: **PASS** (1 test passed, 520 ms)
+
+* **Exact Transaction Sequence Confirmed Under Fix:**
+  ```
+  Tx 1 (client #1):  BEGIN
+  Tx 1 (client #1):  SELECT ... WHERE id IN ($1, $2) ORDER BY id FOR UPDATE  ← acquires row lock, reads 100000
+  Tx 1 (client #1):  [HELD at barrier holding lock — waiting for Tx 2 to dispatch]
+  Tx 2 (client #2):  BEGIN
+  Tx 2 (client #2):  SELECT ... WHERE id IN ($1, $2) ORDER BY id FOR UPDATE  ← BLOCKED by PostgreSQL engine!
+  Tx 1 (client #1):  [UNPAUSED upon Tx 2 dispatch]
+  Tx 1 (client #1):  UPDATE accounts SET balance_paise = balance_paise - 80000 WHERE id = :sourceId AND balance_paise >= 80000
+  Tx 1 (client #1):  UPDATE accounts SET balance_paise = balance_paise + 80000 WHERE id = :dest1Id
+  Tx 1 (client #1):  INSERT INTO transfers ...
+  Tx 1 (client #1):  COMMIT → HTTP 201 Created
+  -------------------------------------------------------------------------------------------------------
+  Tx 2 (client #2):  [UNBLOCKED by PostgreSQL engine upon Tx 1 COMMIT]
+  Tx 2 (client #2):  SELECT re-evaluates committed row → reads balance_paise = 20000
+  Tx 2 (client #2):  Check: 20000 < 80000 → Insufficient funds
+  Tx 2 (client #2):  ROLLBACK → HTTP 422 Unprocessable Entity
+  ```
+
+* **Mitigation Status: VERIFIED AND MITIGATED**
+  - Overdraft is physically prevented by database row-level locking.
+  - The second concurrent transfer cannot read stale balance data.
+  - Deadlock risk is reduced by deterministic UUID sorting (`ORDER BY id`) for transactions locking the same accounts in a consistent order.
+  - Total money in the system is conserved without leakage or double-spending.

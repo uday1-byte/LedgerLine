@@ -19,8 +19,8 @@ const transferSchema = z.object({
 
 /**
  * @route   POST /api/transfers
- * @desc    Execute a basic money transfer between two accounts
- * @access  Public (initial working baseline)
+ * @desc    Execute a money transfer between two accounts with pessimistic row locking
+ * @access  Public
  */
 router.post('/', async (req, res, next) => {
   // 1. Validate request body
@@ -39,13 +39,19 @@ router.post('/', async (req, res, next) => {
     // 2. Begin database transaction
     await client.query('BEGIN');
 
-    // 3. Verify source account exists
-    const sourceResult = await client.query(
-      'SELECT id, account_number, balance_paise FROM accounts WHERE id = $1',
-      [sourceAccountId]
+    // 3. Lock both accounts in deterministic order (ORDER BY id) with SELECT ... FOR UPDATE
+    const accountsResult = await client.query(
+      `SELECT id, account_number, balance_paise
+       FROM accounts
+       WHERE id IN ($1, $2)
+       ORDER BY id
+       FOR UPDATE`,
+      [sourceAccountId, destinationAccountId]
     );
 
-    if (sourceResult.rows.length === 0) {
+    // Verify source account exists
+    const sourceAccount = accountsResult.rows.find((r) => r.id === sourceAccountId);
+    if (!sourceAccount) {
       await client.query('ROLLBACK');
       return res.status(404).json({
         error: 'NotFoundError',
@@ -53,17 +59,9 @@ router.post('/', async (req, res, next) => {
       });
     }
 
-    const sourceAccount = sourceResult.rows[0];
-    const sourceBalance = BigInt(sourceAccount.balance_paise);
-    const transferAmount = BigInt(amountPaise);
-
-    // 4. Verify destination account exists
-    const destResult = await client.query(
-      'SELECT id, account_number, balance_paise FROM accounts WHERE id = $1',
-      [destinationAccountId]
-    );
-
-    if (destResult.rows.length === 0) {
+    // Verify destination account exists
+    const destAccount = accountsResult.rows.find((r) => r.id === destinationAccountId);
+    if (!destAccount) {
       await client.query('ROLLBACK');
       return res.status(404).json({
         error: 'NotFoundError',
@@ -71,10 +69,10 @@ router.post('/', async (req, res, next) => {
       });
     }
 
-    const destAccount = destResult.rows[0];
-    const destBalance = BigInt(destAccount.balance_paise);
+    const sourceBalance = BigInt(sourceAccount.balance_paise);
+    const transferAmount = BigInt(amountPaise);
 
-    // 5. Check whether the sender has sufficient funds
+    // 4. Check whether the sender has sufficient funds using the locked balance
     if (sourceBalance < transferAmount) {
       await client.query('ROLLBACK');
       return res.status(422).json({
@@ -85,19 +83,35 @@ router.post('/', async (req, res, next) => {
       });
     }
 
-    // 6. Deduct the amount from the sender
+    // 5. Deduct the amount from the sender with defense-in-depth conditional check
     const updatedSource = await client.query(
-      'UPDATE accounts SET balance_paise = balance_paise - $1, updated_at = NOW() WHERE id = $2 RETURNING balance_paise',
+      `UPDATE accounts
+       SET balance_paise = balance_paise - $1, updated_at = NOW()
+       WHERE id = $2 AND balance_paise >= $1
+       RETURNING balance_paise`,
       [transferAmount.toString(), sourceAccountId]
     );
 
-    // 7. Credit the receiver
+    if (updatedSource.rowCount !== 1) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        error: 'InsufficientFundsError',
+        message: 'Sender has insufficient funds for this transfer',
+        currentBalancePaise: sourceBalance.toString(),
+        attemptedAmountPaise: transferAmount.toString(),
+      });
+    }
+
+    // 6. Credit the receiver
     const updatedDest = await client.query(
-      'UPDATE accounts SET balance_paise = balance_paise + $1, updated_at = NOW() WHERE id = $2 RETURNING balance_paise',
+      `UPDATE accounts
+       SET balance_paise = balance_paise + $1, updated_at = NOW()
+       WHERE id = $2
+       RETURNING balance_paise`,
       [transferAmount.toString(), destinationAccountId]
     );
 
-    // 8. Record the transfer record
+    // 7. Record the transfer record
     const transferRecord = await client.query(
       `INSERT INTO transfers (source_account_id, destination_account_id, amount_paise, status)
        VALUES ($1, $2, $3, 'completed')
@@ -109,7 +123,7 @@ router.post('/', async (req, res, next) => {
 
     const createdTransfer = transferRecord.rows[0];
 
-    // 9. Return transfer confirmation
+    // 8. Return transfer confirmation
     return res.status(201).json({
       message: 'Transfer completed successfully',
       transfer: {

@@ -261,3 +261,100 @@ Is Source Overdrawn    : YES — OVERDRAFT CONFIRMED
 4. **Fix required (not yet applied — awaiting user approval):**
    - Add `SELECT ... FOR UPDATE` to serialize concurrent row access.
    - Optionally add `AND balance_paise >= $1` to the `UPDATE` as a defence-in-depth guard.
+
+
+---
+
+## Phase 3: Concurrency Hardening & Regression Verification (2026-11-08)
+
+### User Request
+> "APPROVED: Proceed with Phase 3 concurrency hardening.
+> Use your read-only architecture plan and implement the following changes.
+> FILES:
+> 1. backend/src/routes/transfers.js
+> 2. backend/tests/deterministic-concurrency.test.js
+> 3. PROMPTS.md
+> 4. THREATS.md
+> IMPLEMENTATION REQUIREMENTS:
+> A. PostgreSQL locking: SELECT id, account_number, balance_paise FROM accounts WHERE id IN ($1, $2) ORDER BY id FOR UPDATE. Verify both requested accounts exist. Use locked source account balance for insufficient-funds check. Deterministic lock ordering to reduce deadlock risk.
+> B. Conditional deduction: UPDATE accounts SET balance_paise = balance_paise - $1, updated_at = NOW() WHERE id = $2 AND balance_paise >= $1 RETURNING balance_paise. Check rowCount. If rowCount is zero, roll back and return HTTP 422. Never credit destination if source deduction fails.
+> C. Transaction safety: Preserve BEGIN, COMMIT, ROLLBACK and client.release() behavior. Preserve API response formats and validation. Preserve BigInt handling. No floating-point calculations. No swallowed database errors.
+> D. Deterministic regression test: Verify secure outcome. Exactly one 201 and one 422. Source balance exactly 20000 paise. Exactly one destination receives 80000 paise; other remains zero. Total money conserved at 100000 paise. No negative balance. Assert both concurrent requests used distinct clients. Adapt barrier to prevent deadlock with FOR UPDATE. Scoped cleanup.
+> E. Documentation: Preserve historical vulnerability experiment and original -60000 evidence. Add dated entry to PROMPTS.md. Update THREATS.md only after regression test passes."
+
+### Key Implementation Details
+
+1. **Deterministic Row Locking with `SELECT ... FOR UPDATE`:**
+   In `backend/src/routes/transfers.js`, replaced non-locking queries with:
+   ```sql
+   SELECT id, account_number, balance_paise
+   FROM accounts
+   WHERE id IN ($1, $2)
+   ORDER BY id
+   FOR UPDATE
+   ```
+   - Deterministic `ORDER BY id` reduces deadlock risk for transactions locking the same accounts in a consistent order.
+   - Verified existence of both source and destination accounts.
+   - Extracted locked `sourceAccount.balance_paise` for in-transaction balance check.
+
+2. **Defense-in-Depth Conditional Deduction:**
+   Deduction statement hardened to:
+   ```sql
+   UPDATE accounts
+   SET balance_paise = balance_paise - $1, updated_at = NOW()
+   WHERE id = $2 AND balance_paise >= $1
+   RETURNING balance_paise
+   ```
+   Added check `if (updatedSource.rowCount !== 1)` triggering rollback and HTTP 422 `InsufficientFundsError`.
+
+3. **Deterministic Concurrency Regression Test:**
+   Updated `backend/tests/deterministic-concurrency.test.js`:
+   - Client #1 acquires the row lock via `SELECT ... FOR UPDATE`.
+   - Client #1 pauses inside its transaction while Client #2 dispatches its concurrent `SELECT ... FOR UPDATE`.
+   - Client #2's query blocks at the PostgreSQL engine level, proving row-level serialization.
+   - Client #1 commits its transfer (HTTP 201).
+   - PostgreSQL unblocks Client #2, which re-evaluates the committed row, reads the updated balance (`20,000` paise), rejects with HTTP 422, and rolls back.
+   - Strict assertions enforce:
+     - `expect([res1.statusCode, res2.statusCode].sort()).toEqual([201, 422])`
+     - `expect(finalSourceBalance).toBe(20000n)`
+     - `expect([finalDest1Balance, finalDest2Balance].sort()).toEqual([0n, 80000n])`
+     - `expect(totalMoney).toBe(100000n)`
+     - `expect(finalSourceBalance).toBeGreaterThanOrEqual(0n)`
+     - `expect(transfersDb.rows.length).toBe(1)`
+     - `expect(distinctClients.size).toBe(2)`
+
+### Test Execution Results
+
+**Command 1:** `npx.cmd jest backend/tests/deterministic-concurrency.test.js --runInBand --verbose`
+```text
+=== CONCURRENCY REGRESSION TEST RESULTS ===
+Barrier Timed Out      : NO — Both requests synchronized
+Second Client Dispatched: YES — Contended for row lock
+Distinct Client IDs    : 1, 2
+Observed Source Reads  : [{"clientId":1,"order":1,"balance":"100000"},{"clientId":2,"order":2,"balance":"20000"}]
+Request 1 HTTP Status  : 201
+Request 2 HTTP Status  : 422
+Initial Source Balance : 100000 paise  (₹1,000.00)
+Final Source Balance   : 20000 paise
+Final Dest 1 Balance   : 80000 paise
+Final Dest 2 Balance   : 0 paise
+Total Money in System  : 100000 paise
+Completed Transfers    : 1
+Is Source Overdrawn    : NO — PROTECTED
+===========================================
+PASS backend/tests/deterministic-concurrency.test.js (520 ms)
+```
+
+**Command 2 (Full Suite):** `npx.cmd jest --runInBand --verbose`
+```text
+Test Suites: 4 passed, 4 total
+Tests:       11 passed, 11 total
+Snapshots:   0 total
+Time:        5.699 s
+```
+
+### Invariant & Security Verification
+- **Overdraft Prevented:** Source balance is strictly 20,000 paise (not negative).
+- **Mutual Exclusion Verified:** Client #2 observed 20,000 paise only after Client #1 committed.
+- **Money Conserved:** Exactly 100,000 paise in system (20,000 + 80,000 + 0).
+- **Historical Evidence Preserved:** Experiment 2B (-60,000 paise overdraft) remains intact in documentation as the baseline benchmark.
