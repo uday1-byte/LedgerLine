@@ -182,3 +182,80 @@ The current implementation of `POST /api/transfers` provides an initial working 
   - The second concurrent transfer cannot read stale balance data.
   - Deadlock risk is reduced by deterministic UUID sorting (`ORDER BY id`) for transactions locking the same accounts in a consistent order.
   - Total money in the system is conserved without leakage or double-spending.
+
+---
+
+## 7. Phase 4: Double-Entry Ledger, Idempotency & Financial Invariants
+
+### 7.1 Double-Entry Balance Balancing & Transaction Incompleteness
+* **Threat:** A partial system failure, software bug, or network timeout leaves a transfer half-committed (e.g. sender debited but recipient not credited), or a developer creates unbalanced ledger entries.
+* **Mitigation:**
+  - Every financial transaction produces dual ledger entries: exactly one debit and exactly one credit.
+  - Database constraint triggers (`trg_verify_transfer_balance` and `trg_verify_ledger_entry_balance`) are declared `CONSTRAINT ... DEFERRABLE INITIALLY DEFERRED`.
+  - At transaction commit time, PostgreSQL evaluates the deferred constraint trigger and asserts:
+    1. Exactly one credit and one debit entry exist for the transfer (`LL001`).
+    2. The debit amount equals the credit amount and matches the transfer `amount_paise` (`LL002`).
+    3. The entries reference the exact accounts matching the transfer's source and destination (`LL003`, `LL004`).
+  - Constraint validation logic uses PostgreSQL-compatible text-cast aggregation `(MAX(account_id::text) FILTER (...))::uuid` to reliably identify account UUIDs without relying on unsupported aggregate operators (preventing PostgreSQL SQLSTATE 42883).
+  - If any condition is violated, PostgreSQL aborts the entire transaction with an error.
+
+### 7.2 Ledger Immutability & Anti-Tampering
+* **Threat:** Malicious administrative access, rogue SQL queries, or backend bugs modify or delete historical ledger records or completed transfers.
+* **Mitigation:**
+  - Immutability trigger functions (`prevent_ledger_mutation` and `prevent_transfer_mutation`) unconditionally intercept all `UPDATE` and `DELETE` statements on `ledger_entries` and `transfers`.
+  - There are **no session-level backdoors or bypass settings**. Immutability is absolute in both application code and database triggers (SQL state `LL007`: "ledger_entries is append-only").
+  - The runtime application role `ledgerline_app` is granted only `SELECT, INSERT` on `ledger_entries` and `transfers`. It does not own the tables and has no `TRUNCATE`, `UPDATE`, or `DELETE` privileges or ability to disable triggers. Attempted `UPDATE` or `DELETE` by `ledgerline_app` is rejected at the PostgreSQL engine level with SQLSTATE `42501` (permission denied).
+  - **Defense-in-Depth Immutability:** Even if executed by a privileged role or table owner (`ledgerline_owner`), the `prevent_ledger_mutation` and `prevent_transfer_mutation` triggers intercept the operation and unconditionally abort with SQLSTATE `LL007` ("append-only ledger entries cannot be updated or deleted").
+  - Foreign keys between `ledger_entries` and `accounts`/`transfers` use `ON DELETE RESTRICT`.
+
+### 7.3 Duplicate Network Requests & Replay Attacks
+* **Threat:** Transient network timeouts cause clients to retry transfer requests, leading to accidental double transfers; or an attacker captures and replays transfer requests with altered parameters.
+* **Mitigation:**
+  - Mandatory `Idempotency-Key` header on all mutating transfer and reversal requests.
+  - Scoped idempotency (`client_scope`): transfers are scoped to `account:<sourceAccountId>` and reversals to `reversal:<originalTransferId>`, preventing key collision across distinct accounts while forward-compatible with user authentication (`user:<userId>`).
+  - Request hashing: A SHA-256 hash of canonical business parameters (`sourceAccountId`, `destinationAccountId`, `amountPaise`) is computed and stored.
+  - Transaction-safe concurrency: The backend executes a bounded claim-and-retry loop (up to 3 attempts) using `INSERT INTO idempotency_keys ... ON CONFLICT (client_scope, key) DO NOTHING RETURNING key`.
+  - If a second identical request arrives while the first is in-flight, it executes `SELECT ... FOR UPDATE` on the idempotency key row. It blocks at the PostgreSQL engine level until the first transaction completes.
+  - If the committed response exists:
+    - If the request hash matches, it replays the committed response with header `Idempotent-Replayed: true`.
+    - If the request hash differs, it rejects the request with HTTP `409 Conflict`.
+  - If the first transaction rolls back due to a crash, transient failure, or business refusal:
+    - The uncommitted idempotency reservation is rolled back by PostgreSQL.
+    - Waiting requests detect that no row exists, cleanly abort their current transaction block, and loop to claim the key in a fresh transaction without race conditions or aborted-transaction crashes.
+  - **Business Refusal Retriability Policy:** If a transfer fails a business validation or solvency check (such as `InsufficientFundsError` 422 or `NotFoundError` 404), the transaction rolls back, releasing the idempotency reservation. This allows the client to add funds or correct parameters and retry the transfer with the same idempotency key later.
+
+### 7.4 Transfer Reversals & Double-Reversal Abuse
+* **Threat:** A user or administrator reverses the same transfer multiple times, or reverses a transfer after the recipient has already spent the received funds, driving the recipient into an unauthorized overdraft.
+* **Mitigation:**
+  - Compensating transactions: Reversals **never modify or update the original completed transfer** (preserving complete financial audit history). Instead, a new transfer record is created with `transfer_type = 'reversal'`, linking to `original_transfer_id`, and generating two compensating ledger entries (debit recipient, credit original sender).
+  - Determining reversal status: Applications and auditors determine whether an original transfer has been reversed by querying:
+    ```sql
+    SELECT * FROM transfers
+    WHERE original_transfer_id = :originalTransferId
+      AND transfer_type = 'reversal';
+    ```
+  - Database-enforced uniqueness: A PostgreSQL partial unique index `idx_transfers_unique_reversal ON transfers (original_transfer_id) WHERE original_transfer_id IS NOT NULL AND transfer_type = 'reversal'` physically guarantees that an original transfer cannot be reversed more than once at the database engine level.
+  - Recipient solvency check: Before executing a reversal, the recipient account is locked with `FOR UPDATE` and its balance is verified against the reversal amount. If `balance_paise < amount_paise`, the reversal is rejected with HTTP `422 Unprocessable Entity` ("Destination account has insufficient funds to reverse this transfer").
+
+### 7.5 Legacy Opening Balance Accounting & Zero-Sum Invariants
+* **Threat:** Initial balance migration introduces phantom currency or distorts existing customer account balances.
+* **Mitigation:**
+  - Dedicated System Equity Account (`00000000-0000-0000-0000-000000000001`, `SYSTEM_EQUITY_OPENING_BALANCE`).
+  - Migration script preserves existing customer balances without modification.
+  - The final system equity balance is calculated as the negative sum of all customer opening balances:
+    $$\text{Balance}_{\text{equity}} = -\sum_{i} \text{Balance}_{\text{customer}_i}$$
+  - For positive customer balances: Debit System Equity, Credit Customer.
+  - For negative customer balances: Debit Customer, Credit System Equity.
+  - Zero-sum conservation: The database invariant $\sum_{\text{all accounts}} \text{balance\_paise} = 0$ is asserted and verified upon completion of the cutover.
+
+### 7.6 Database Role Separation & Least Privilege
+* **Threat:** The application service or an attacker exploiting an application vulnerability alters database schemas, disables triggers, or truncates tables.
+* **Mitigation:**
+  - Two-role architecture (`database/provision_roles.sql`):
+    - `ledgerline_owner`: Migration and schema owner. Executes migrations (`npm run migrate:backend`). Owns all tables, sequences, and triggers. Not used for customer HTTP traffic.
+    - `ledgerline_app`: Restricted runtime application login role used by the Node.js Express server.
+  - Role permissions enforcement:
+    - `ledgerline_app` has `GRANT SELECT, INSERT, UPDATE` on `accounts` (cannot alter table or truncate).
+    - `ledgerline_app` has `GRANT SELECT, INSERT` on `transfers` and `ledger_entries` (no UPDATE, DELETE, or TRUNCATE).
+    - `ledgerline_app` has `REVOKE ALL` on `schema_migrations`.
+    - Only `ledgerline_owner` can execute DDL or modify triggers.

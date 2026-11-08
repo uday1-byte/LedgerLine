@@ -1,10 +1,15 @@
+const fs = require('fs');
 const dotenv = require('dotenv');
 const path = require('path');
 const { z } = require('zod');
 
-// Load .env file from backend root or workspace root
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
-dotenv.config(); // Fallback to default cwd .env
+// Load .env file from backend root or workspace root silently without console noise
+const backendEnvPath = path.resolve(__dirname, '../../.env');
+if (fs.existsSync(backendEnvPath)) {
+  dotenv.config({ path: backendEnvPath, quiet: true });
+} else {
+  dotenv.config({ quiet: true });
+}
 
 // Define schema for required and optional environment variables
 const envSchema = z.object({

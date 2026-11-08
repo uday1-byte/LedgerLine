@@ -2,7 +2,7 @@ const request = require('supertest');
 const app = require('../src/app');
 const { pool } = require('../src/config/db');
 
-describe('POST /api/transfers - Basic Transfers (Experiment 1)', () => {
+describe('POST /api/transfers - Basic Transfers (Experiment 1 & Phase 4)', () => {
   let sourceAccountId;
   let destinationAccountId;
 
@@ -26,24 +26,28 @@ describe('POST /api/transfers - Basic Transfers (Experiment 1)', () => {
   });
 
   afterEach(async () => {
-    // Scoped cleanup: delete only the specific transfers and accounts created by this test
-    if (sourceAccountId && destinationAccountId) {
-      await pool.query(
-        `DELETE FROM transfers
-         WHERE source_account_id IN ($1, $2)
-            OR destination_account_id IN ($1, $2)`,
-        [sourceAccountId, destinationAccountId]
-      );
-      await pool.query(
-        `DELETE FROM accounts
-         WHERE id IN ($1, $2)`,
-        [sourceAccountId, destinationAccountId]
-      );
-    }
+    // In an append-only ledger, test accounts and transfers persist in the isolated test database
+    // and are reset between runs via test database recreation or truncation by the test runner.
   });
 
   afterAll(async () => {
     await pool.end();
+  });
+
+  describe('Mandatory Idempotency-Key Header', () => {
+    it('should return 400 when Idempotency-Key header is missing', async () => {
+      const res = await request(app)
+        .post('/api/transfers')
+        .send({
+          sourceAccountId,
+          destinationAccountId,
+          amountPaise: 10000,
+        });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body).toHaveProperty('error', 'ValidationError');
+      expect(res.body.message).toContain('Idempotency-Key header is required');
+    });
   });
 
   describe('Successful Transfer', () => {
@@ -56,6 +60,7 @@ describe('POST /api/transfers - Basic Transfers (Experiment 1)', () => {
 
       const res = await request(app)
         .post('/api/transfers')
+        .set('Idempotency-Key', `TX-KEY-${Date.now()}-${Math.random()}`)
         .send(transferPayload);
 
       expect(res.statusCode).toBe(201);
@@ -84,6 +89,23 @@ describe('POST /api/transfers - Basic Transfers (Experiment 1)', () => {
       const transferDb = await pool.query('SELECT * FROM transfers WHERE id = $1', [res.body.transfer.id]);
       expect(transferDb.rows.length).toBe(1);
       expect(transferDb.rows[0].amount_paise).toBe('30000');
+
+      // Verify exactly two ledger entries created in PostgreSQL
+      const ledgerDb = await pool.query(
+        'SELECT * FROM ledger_entries WHERE transfer_id = $1 ORDER BY entry_type ASC',
+        [res.body.transfer.id]
+      );
+      expect(ledgerDb.rows.length).toBe(2);
+      // Credit entry (destination)
+      expect(ledgerDb.rows[0].entry_type).toBe('credit');
+      expect(ledgerDb.rows[0].account_id).toBe(destinationAccountId);
+      expect(ledgerDb.rows[0].amount_paise).toBe('30000');
+      expect(ledgerDb.rows[0].balance_after_paise).toBe('80000');
+      // Debit entry (source)
+      expect(ledgerDb.rows[1].entry_type).toBe('debit');
+      expect(ledgerDb.rows[1].account_id).toBe(sourceAccountId);
+      expect(ledgerDb.rows[1].amount_paise).toBe('30000');
+      expect(ledgerDb.rows[1].balance_after_paise).toBe('70000');
     });
   });
 
@@ -97,6 +119,7 @@ describe('POST /api/transfers - Basic Transfers (Experiment 1)', () => {
 
       const res = await request(app)
         .post('/api/transfers')
+        .set('Idempotency-Key', `TX-KEY-${Date.now()}-${Math.random()}`)
         .send(transferPayload);
 
       expect(res.statusCode).toBe(422);
@@ -126,6 +149,7 @@ describe('POST /api/transfers - Basic Transfers (Experiment 1)', () => {
       const randomUuid = '00000000-0000-0000-0000-000000000000';
       const res = await request(app)
         .post('/api/transfers')
+        .set('Idempotency-Key', `TX-KEY-${Date.now()}-${Math.random()}`)
         .send({
           sourceAccountId: randomUuid,
           destinationAccountId,
@@ -141,6 +165,7 @@ describe('POST /api/transfers - Basic Transfers (Experiment 1)', () => {
       const randomUuid = '00000000-0000-0000-0000-000000000000';
       const res = await request(app)
         .post('/api/transfers')
+        .set('Idempotency-Key', `TX-KEY-${Date.now()}-${Math.random()}`)
         .send({
           sourceAccountId,
           destinationAccountId: randomUuid,
@@ -155,6 +180,7 @@ describe('POST /api/transfers - Basic Transfers (Experiment 1)', () => {
     it('should return 400 when transferring to the same account', async () => {
       const res = await request(app)
         .post('/api/transfers')
+        .set('Idempotency-Key', `TX-KEY-${Date.now()}-${Math.random()}`)
         .send({
           sourceAccountId,
           destinationAccountId: sourceAccountId,
@@ -168,6 +194,7 @@ describe('POST /api/transfers - Basic Transfers (Experiment 1)', () => {
     it('should return 400 when amount is zero or negative', async () => {
       const res = await request(app)
         .post('/api/transfers')
+        .set('Idempotency-Key', `TX-KEY-${Date.now()}-${Math.random()}`)
         .send({
           sourceAccountId,
           destinationAccountId,

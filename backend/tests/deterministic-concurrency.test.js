@@ -36,7 +36,7 @@ jest.setTimeout(20000);
 let server;
 let serverPort;
 
-function httpPost(port, path, body) {
+function httpPost(port, path, body, customHeaders = {}) {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
     const req = http.request(
@@ -49,6 +49,7 @@ function httpPost(port, path, body) {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(payload),
           'Connection': 'close',
+          ...customHeaders,
         },
       },
       (res) => {
@@ -115,18 +116,6 @@ describe('Phase 3 Concurrency Hardening: Deterministic Regression Test', () => {
   afterEach(async () => {
     if (originalConnect) {
       pool.connect = originalConnect;
-    }
-    if (sourceAccountId && dest1AccountId && dest2AccountId) {
-      await pool.query(
-        `DELETE FROM transfers
-         WHERE source_account_id = $1
-            OR destination_account_id IN ($2, $3)`,
-        [sourceAccountId, dest1AccountId, dest2AccountId]
-      );
-      await pool.query(
-        `DELETE FROM accounts WHERE id IN ($1, $2, $3)`,
-        [sourceAccountId, dest1AccountId, dest2AccountId]
-      );
     }
   }, 10000);
 
@@ -220,11 +209,15 @@ describe('Phase 3 Concurrency Hardening: Deterministic Regression Test', () => {
           sourceAccountId,
           destinationAccountId: dest1AccountId,
           amountPaise: 80000,
+        }, {
+          'Idempotency-Key': `DET-KEY-1-${Date.now()}-${Math.random()}`,
         }),
         httpPost(serverPort, '/api/transfers', {
           sourceAccountId,
           destinationAccountId: dest2AccountId,
           amountPaise: 80000,
+        }, {
+          'Idempotency-Key': `DET-KEY-2-${Date.now()}-${Math.random()}`,
         }),
       ]);
     } finally {

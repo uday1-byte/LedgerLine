@@ -37,20 +37,8 @@ describe('Experiment 2: Concurrent Transfers Security Test', () => {
   });
 
   afterEach(async () => {
-    // Scoped cleanup: delete only the specific transfers and accounts created by this test
-    if (sourceAccountId && dest1AccountId && dest2AccountId) {
-      await pool.query(
-        `DELETE FROM transfers
-         WHERE source_account_id = $1
-            OR destination_account_id IN ($2, $3)`,
-        [sourceAccountId, dest1AccountId, dest2AccountId]
-      );
-      await pool.query(
-        `DELETE FROM accounts
-         WHERE id IN ($1, $2, $3)`,
-        [sourceAccountId, dest1AccountId, dest2AccountId]
-      );
-    }
+    // In an append-only ledger, test accounts and transfers persist in the isolated test database
+    // and are reset between runs via test database recreation or truncation by the test runner.
   });
 
   afterAll(async () => {
@@ -62,6 +50,7 @@ describe('Experiment 2: Concurrent Transfers Security Test', () => {
     // Combined requested: 160,000 paise > 100,000 paise available
     const req1 = request(app)
       .post('/api/transfers')
+      .set('Idempotency-Key', `CONC-KEY-1-${Date.now()}-${Math.random()}`)
       .send({
         sourceAccountId,
         destinationAccountId: dest1AccountId,
@@ -70,6 +59,7 @@ describe('Experiment 2: Concurrent Transfers Security Test', () => {
 
     const req2 = request(app)
       .post('/api/transfers')
+      .set('Idempotency-Key', `CONC-KEY-2-${Date.now()}-${Math.random()}`)
       .send({
         sourceAccountId,
         destinationAccountId: dest2AccountId,

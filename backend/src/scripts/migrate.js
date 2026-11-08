@@ -1,11 +1,29 @@
 const fs = require('fs');
 const path = require('path');
-const { pool } = require('../config/db');
+const { Pool } = require('pg');
+const env = require('../config/env');
+
+// Configure migration runner pool: supports dedicated migration owner credentials (MIGRATION_DB_USER),
+// falling back to standard application database credentials (DB_USER).
+const migrationUser = process.env.MIGRATION_DB_USER || env.DB_USER;
+const migrationPassword = process.env.MIGRATION_DB_PASSWORD !== undefined
+  ? process.env.MIGRATION_DB_PASSWORD
+  : env.DB_PASSWORD;
+
+const migrationPool = new Pool({
+  host: env.DB_HOST,
+  port: env.DB_PORT,
+  database: env.DB_NAME,
+  user: migrationUser,
+  password: migrationPassword,
+  max: 2,
+  connectionTimeoutMillis: 5000,
+});
 
 async function runMigrations() {
-  const client = await pool.connect();
+  const client = await migrationPool.connect();
   try {
-    console.log('Running database migrations...');
+    console.log(`Running database migrations (connected as role: ${migrationUser})...`);
 
     // Ensure migrations table exists
     await client.query(`
@@ -51,7 +69,7 @@ async function runMigrations() {
     console.log('All migrations completed successfully.');
   } finally {
     client.release();
-    await pool.end();
+    await migrationPool.end();
   }
 }
 

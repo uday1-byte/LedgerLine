@@ -48,7 +48,8 @@ LedgerLine/
 │       ├── health.test.js                     # Supertest integration tests for health endpoints
 │       ├── transfers.test.js                  # Supertest tests for basic money transfer endpoint
 │       ├── concurrency.test.js                # Exploratory concurrent transfer test
-│       └── deterministic-concurrency.test.js  # Deterministic barrier synchronization race condition reproduction test
+│       ├── deterministic-concurrency.test.js  # Deterministic barrier synchronization race condition reproduction test
+│       └── ledger.test.js                     # Phase 4 automated financial integrity & double-entry ledger tests
 │
 ├── frontend/                 # React 18 + Vite frontend client
 │   ├── .env.example          # Frontend-specific environment variables template
@@ -64,7 +65,9 @@ LedgerLine/
 └── database/                 # Database schema and migration management
     ├── README.md             # Migration documentation and conventions
     └── migrations/           # Versioned SQL migration scripts (.sql)
-        └── 001_create_accounts_and_transfers.sql
+        ├── 001_create_accounts_and_transfers.sql
+        ├── 002_create_ledger_entries_and_idempotency.sql
+        └── 003_fix_verify_transfer_balance_uuid_aggregation.sql
 ```
 
 ---
@@ -100,12 +103,33 @@ JWT_EXPIRES_IN=24h
 CLIENT_URL=http://localhost:5173
 ```
 
-### 3. Run Database Migrations
-Run the version-controlled migration script from the project root:
-```powershell
-npm run migrate:backend
-```
-*(Applies `001_create_accounts_and_transfers.sql` to set up `accounts`, `transfers`, and `schema_migrations`).*
+### 3. Fresh Database Provisioning & Migrations Setup Sequence
+
+To set up a fresh database (e.g. `ledgerline_dev` or an isolated test database `ledgerline_test`) reliably:
+
+1. **Create the Database (as postgres administrator):**
+   ```sql
+   CREATE DATABASE ledgerline_dev;
+   ```
+2. **Provision Roles & Schema Ownership (as postgres administrator in the database):**
+   ```powershell
+   psql -d ledgerline_dev -f database/provision_roles.sql
+   ```
+   *(Creates `ledgerline_owner` and `ledgerline_app`, assigns `public` schema ownership to `ledgerline_owner`, and revokes default public access).*
+3. **Provision Role Passwords out-of-band (never committed to Git):**
+   ```sql
+   ALTER ROLE ledgerline_owner WITH PASSWORD 'your_owner_password_here';
+   ALTER ROLE ledgerline_app WITH PASSWORD 'your_app_password_here';
+   ```
+4. **Run Database Migrations (as `ledgerline_owner`):**
+   ```powershell
+   npm run migrate:backend
+   ```
+   *(Executes migrations via `migrate.js` using `MIGRATION_DB_USER=ledgerline_owner`, creating tables and assigning runtime least-privilege grants to `ledgerline_app`).*
+5. **Start Runtime Application (as `ledgerline_app`):**
+   ```powershell
+   npm run dev:backend
+   ```
 
 ---
 
@@ -140,8 +164,9 @@ npm run migrate:backend
   }
   ```
 
-### 2. Basic Money Transfers (Experiment 1 Baseline)
+### 2. Money Transfers (Phase 4 Double-Entry & Idempotent)
 * **Endpoint:** `POST /api/transfers`
+* **Headers:** `Idempotency-Key: <unique-client-key>` (Mandatory)
 * **Context:** In this example, the source account has an initial balance of 100,000 paise (₹1,000.00) and the destination account has an initial balance of 50,000 paise (₹500.00).
 * **Request Body:**
   ```json
@@ -161,7 +186,8 @@ npm run migrate:backend
       "destinationAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
       "amountPaise": "30000",
       "status": "completed",
-      "createdAt": "2026-11-07T11:40:00.000Z"
+      "transferType": "transfer",
+      "createdAt": "2026-11-08T12:00:00.000Z"
     },
     "updatedBalances": {
       "sourceAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
@@ -171,10 +197,75 @@ npm run migrate:backend
     }
   }
   ```
+* **Idempotent Replay Response (201 Created):**
+  Returns identical body with HTTP response header `Idempotent-Replayed: true`.
 * **Error Responses:**
-  * `400 Bad Request`: Input validation failed (negative amount, invalid UUID, same source/destination).
+  * `400 Bad Request`: Missing `Idempotency-Key` header or input validation failed.
   * `404 Not Found`: Source or destination account not found.
-  * `422 Unprocessable Entity`: Sender has insufficient funds.
+  * `409 Conflict`: Re-sending same idempotency key with conflicting request payload parameters.
+  * `422 Unprocessable Entity`: Sender has insufficient funds (rolls back transaction and idempotency reservation, allowing retry with same key once funded).
+
+### 3. Transfer Reversals (Phase 4 Compensating Ledger Reversal)
+* **Endpoint:** `POST /api/transfers/:id/reversal`
+* **Headers:** `Idempotency-Key: <unique-client-key>` (Mandatory)
+* **Audit & Immutability Guarantee:** The original completed transfer record is **never modified or updated**. Instead, an explicit compensating transfer record (`transfer_type = 'reversal'`) and dual compensating ledger entries are created.
+* **Reversal Lookup Pattern:** To verify whether a completed transfer has been reversed, applications and auditors query:
+  ```sql
+  SELECT * FROM transfers
+  WHERE original_transfer_id = :originalTransferId
+    AND transfer_type = 'reversal';
+  ```
+* **Request Body:**
+  ```json
+  {
+    "reversalReason": "Customer dispute resolved"
+  }
+  ```
+* **Success Response (201 Created):**
+  ```json
+  {
+    "message": "Transfer reversed successfully",
+    "reversal": {
+      "id": "d3eebc99-9c0b-4ef8-bb6d-6bb9bd380a44",
+      "originalTransferId": "c2eebc99-9c0b-4ef8-bb6d-6bb9bd380a33",
+      "sourceAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
+      "destinationAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+      "amountPaise": "30000",
+      "status": "completed",
+      "transferType": "reversal",
+      "reversalReason": "Customer dispute resolved",
+      "createdAt": "2026-11-08T12:05:00.000Z"
+    },
+    "restoredBalances": {
+      "sourceAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+      "sourceBalancePaise": "100000",
+      "destinationAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
+      "destinationBalancePaise": "50000"
+    }
+  }
+  ```
+* **Error Responses:**
+  * `400 Bad Request`: Missing `Idempotency-Key` header.
+  * `404 Not Found`: Original transfer not found.
+  * `409 Conflict`: Transfer has already been reversed (enforced by partial unique index `idx_transfers_unique_reversal`).
+  * `422 Unprocessable Entity`: Destination account has insufficient funds to reverse the transfer.
+
+---
+
+## 🔒 Database Roles & Security Architecture
+
+LedgerLine uses a simplified, least-privilege two-role architecture (`database/provision_roles.sql`):
+
+1. **`ledgerline_owner` (Migration & Schema Owner):**
+   - Owns the `public` schema and all tables (`accounts`, `transfers`, `ledger_entries`, `idempotency_keys`, `schema_migrations`).
+   - Used exclusively to run migrations (`npm run migrate:backend`).
+   - Not used to handle normal application HTTP traffic.
+2. **`ledgerline_app` (Restricted Application Role):**
+   - Used by the Node.js Express server to handle application traffic.
+   - **No Table Ownership:** Cannot alter schemas or disable database triggers.
+   - **No Truncate Privileges:** Cannot truncate any financial tables.
+   - **Strict Append-Only Enforcement:** Granted only `SELECT, INSERT` on `transfers` and `ledger_entries` (no UPDATE or DELETE privileges).
+   - Attempted UPDATE or DELETE operations are blocked both by permission grants and by database triggers (`LL007`). There are no session-level backdoors.
 
 ---
 
@@ -185,41 +276,39 @@ Automated tests are executed using **Jest** and **Supertest**:
 npm run test:backend
 ```
 
-**Test Coverage Status (11 passing tests across 4 suites):**
-- `tests/health.test.js` (3 tests):
-  - `GET /` welcome payload (200)
-  - `GET /api/health` system status (200)
-  - `GET /api/unknown-route` 404 handler (404)
-- `tests/transfers.test.js` (6 tests - with scoped account & transfer cleanup):
-  - `POST /api/transfers` successful fund transfer & balance update (201)
-  - `POST /api/transfers` rejection on insufficient funds (422)
-  - `POST /api/transfers` non-existent source account (404)
-  - `POST /api/transfers` non-existent destination account (404)
-  - `POST /api/transfers` rejection on same source & destination (400)
-  - `POST /api/transfers` rejection on non-positive amounts (400)
-- `tests/concurrency.test.js` (1 test):
-  - Exploratory concurrent transfer test launching two simultaneous requests of 80,000 paise against 100,000 paise available
-- `tests/deterministic-concurrency.test.js` (1 test):
-  - Deterministic barrier test confirming TOCTOU race condition (both transactions read 100,000 paise before either commits, reproducing source overdraft to -60,000 paise)
+**Test Safety & Isolation:**
+- Tests run against an isolated test database (e.g. `ledgerline_test`) and never against the development database (`ledgerline_dev`).
+- Each test generates uniquely keyed account records (`TEST-SRC-...`, `CONC-SRC-...`, `DET-SRC-...`, `LEDGER-SRC-...`).
+- The database contains no test cleanup bypasses. Between complete test suite runs, test databases are reset via test runner schema recreation or test-level truncation.
 
----
-
-## ⚠️ Important Implementation Disclaimer
-
-> **Baseline Notice:** The current transfer implementation represents **Experiment 1 (Initial Working Baseline)**. It verifies account existence, checks available balance, deducts from the sender, credits the receiver, and writes a transfer record inside a standard database transaction.
->
-> However, it **does not yet provide production-grade financial guarantees**:
-> - It does not implement pessimistic row locking (`FOR UPDATE`), making it susceptible to race conditions under concurrent requests.
-> - It does not support idempotency keys (network retries could result in duplicate transfers).
-> - It modifies balances directly rather than maintaining an immutable, append-only double-entry ledger.
-> - Refused transfers roll back and do not record an audit trail.
+**Test Suites:**
+- `tests/health.test.js`: Health check endpoints and 404 routing.
+- `tests/transfers.test.js`: Mandatory idempotency key validation, balance updates, debit/credit ledger verification, insufficient funds rejection, and input validations.
+- `tests/concurrency.test.js`: Concurrency transfer tests.
+- `tests/deterministic-concurrency.test.js`: Barrier synchronization race condition tests proving pessimistic row-locking serialization.
+- `tests/ledger.test.js`: 15 comprehensive automated financial integrity proofs:
+  1. Exactly two ledger entries per transfer (1 debit, 1 credit).
+  2. Debit and credit amounts equal transfer amount.
+  3. Correct account references and running balances.
+  4. Incomplete ledger transactions cannot commit (constraint trigger blocks).
+  5. Unbalanced ledger transactions cannot commit (constraint trigger blocks).
+  6. Direct `UPDATE` on `ledger_entries` rejected by immutability trigger (`LL007`).
+  7. Direct `DELETE` on `ledger_entries` rejected by immutability trigger (`LL007`).
+  8. Idempotent re-sending returns cached response with `Idempotent-Replayed: true`.
+  9. Conflicting payloads with same idempotency key return HTTP 409 Conflict.
+  10. Concurrent requests with same key create only one transfer.
+  11. Compensating reversals restore balances and generate dual compensating ledger entries.
+  12. Duplicate reversals rejected (partial unique index & business checks).
+  13. Opening balances preserve customer balances and satisfy zero-sum equilibrium.
+  14. Reversal rejected with HTTP 422 if recipient spent funds.
+  15. Missing `Idempotency-Key` header rejected with HTTP 400.
 
 ---
 
 ## 🗺️ Roadmap
 - [x] **Phase 1: Initial Foundation & Workspace Setup**
 - [x] **Phase 2 Baseline: Initial Migration & Basic Money Transfer (Experiment 1)**
-- [ ] **Phase 2 Hardening: Concurrency Protection (`SELECT ... FOR UPDATE`), Idempotency & Audit Trails**
-- [ ] **Phase 3: User Authentication & Role-Based Authorization**
-- [ ] **Phase 4: Full Double-Entry Balanced Ledger Engine**
-- [ ] **Phase 5: Financial Reporting, Running Statements & UI Integration**
+- [x] **Phase 2 Hardening & Phase 3: Concurrency Protection (`SELECT ... FOR UPDATE`), Row-Level Serialization & Regression Proof**
+- [x] **Phase 4: Full Double-Entry Balanced Ledger Engine, Append-Only Triggers, Idempotency & Reversals**
+- [ ] **Phase 5: User Authentication & Role-Based Authorization**
+- [ ] **Phase 6: Financial Reporting, Running Statements & UI Integration**
