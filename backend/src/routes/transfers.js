@@ -3,6 +3,9 @@ const crypto = require('crypto');
 const { z } = require('zod');
 const { pool } = require('../config/db');
 const { authenticateJWT, requireRole } = require('../middleware/auth');
+const auditService = require('../services/auditService');
+
+const SYSTEM_CASH_CLEARING_ID = '00000000-0000-0000-0000-000000000002';
 
 const router = express.Router();
 
@@ -22,6 +25,40 @@ const transferSchema = z.object({
 // Input validation schema for transfer reversal
 const reversalSchema = z.object({
   reversalReason: z.string().trim().min(1, { message: 'reversalReason cannot be empty' }).max(255).optional().default('Customer requested reversal'),
+});
+
+const PG_MAX_BIGINT = 9223372036854775807n;
+
+// Reusable amount validation: safe integer or decimal string <= PG_MAX_BIGINT
+const amountPaiseSchema = z.union([
+  z.number()
+    .refine((val) => Number.isSafeInteger(val) && val > 0, {
+      message: 'amountPaise must be a positive safe integer',
+    })
+    .transform((val) => BigInt(val)),
+  z.string()
+    .regex(/^[1-9]\d*$/, { message: 'amountPaise must be a positive decimal digit string' })
+    .transform((val) => BigInt(val)),
+]).refine((val) => val <= PG_MAX_BIGINT, {
+  message: `amountPaise exceeds maximum allowed value (${PG_MAX_BIGINT.toString()})`,
+});
+
+// Input validation schema for customer deposits
+const depositSchema = z.object({
+  accountId: z.string().regex(
+    /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/,
+    { message: 'accountId must be a valid UUID' }
+  ),
+  amountPaise: amountPaiseSchema,
+});
+
+// Input validation schema for customer withdrawals
+const withdrawalSchema = z.object({
+  accountId: z.string().regex(
+    /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/,
+    { message: 'accountId must be a valid UUID' }
+  ),
+  amountPaise: amountPaiseSchema,
 });
 
 /**
@@ -294,6 +331,728 @@ router.post('/', authenticateJWT, requireRole('admin', 'account_holder'), async 
     next(err);
   } finally {
     client.release();
+  }
+});
+
+/**
+ * @route   POST /api/transfers/deposit
+ * @desc    Execute an idempotent cash deposit crediting customer account and debiting SYSTEM_CASH_CLEARING
+ * @access  Private (account_holder, admin)
+ */
+router.post('/deposit', authenticateJWT, requireRole('admin', 'account_holder'), async (req, res, next) => {
+  // 1. Validate mandatory Idempotency-Key header
+  const idempotencyKey = req.header('Idempotency-Key');
+  if (!idempotencyKey || typeof idempotencyKey !== 'string' || idempotencyKey.trim().length === 0) {
+    return res.status(400).json({
+      error: 'ValidationError',
+      message: 'Idempotency-Key header is required for financial transactions',
+    });
+  }
+
+  const cleanKey = idempotencyKey.trim();
+
+  // 2. Validate request body
+  const parseResult = depositSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
+      error: 'ValidationError',
+      details: parseResult.error.flatten().fieldErrors,
+    });
+  }
+
+  const { accountId, amountPaise } = parseResult.data;
+
+  // 3. Compute deterministic request hash and client_scope per target account
+  const canonicalPayload = JSON.stringify({
+    accountId,
+    amountPaise: amountPaise.toString(),
+    action: 'deposit',
+  });
+  const requestHash = crypto.createHash('sha256').update(canonicalPayload).digest('hex');
+  const clientScope = `deposit:${accountId}`;
+
+  const client = await pool.connect();
+  let clientReleased = false;
+
+  try {
+    // 4. Bounded, transaction-safe idempotency claim-and-resolve loop
+    const MAX_IDEMPOTENCY_ATTEMPTS = 3;
+    let idempotencyClaimed = false;
+
+    for (let attempt = 1; attempt <= MAX_IDEMPOTENCY_ATTEMPTS; attempt++) {
+      await client.query('BEGIN');
+
+      const insertKeyResult = await client.query(
+        `INSERT INTO idempotency_keys (client_scope, key, request_hash, status, created_at, updated_at)
+         VALUES ($1, $2, $3, 'processing', NOW(), NOW())
+         ON CONFLICT (client_scope, key) DO NOTHING
+         RETURNING key`,
+        [clientScope, cleanKey, requestHash]
+      );
+
+      if (insertKeyResult.rowCount === 1) {
+        idempotencyClaimed = true;
+        break;
+      }
+
+      const existingKeyResult = await client.query(
+        `SELECT client_scope, key, request_hash, status, response_code, response_body
+         FROM idempotency_keys
+         WHERE client_scope = $1 AND key = $2
+         FOR UPDATE`,
+        [clientScope, cleanKey]
+      );
+
+      const existing = existingKeyResult.rows[0];
+
+      if (!existing) {
+        await client.query('ROLLBACK');
+        continue;
+      }
+
+      if (existing.request_hash !== requestHash) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'IdempotencyConflictError',
+          message: 'Idempotency key has already been used with a different request payload',
+        });
+      }
+
+      if (existing.status === 'completed') {
+        await client.query('COMMIT');
+        res.setHeader('Idempotent-Replayed', 'true');
+        return res.status(existing.response_code || 201).json(existing.response_body);
+      }
+
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'ConcurrentRequestError',
+        message: 'A concurrent request with this idempotency key is already in progress',
+      });
+    }
+
+    if (!idempotencyClaimed) {
+      return res.status(503).json({
+        error: 'ConcurrencyConflictError',
+        message: 'Unable to acquire idempotency lock after multiple attempts; please retry',
+      });
+    }
+
+    // 5. Lock both accounts in deterministic order (ORDER BY id ASC) with SELECT ... FOR UPDATE
+    const accountsResult = await client.query(
+      `SELECT id, account_number, balance_paise, account_type, user_id, next_entry_sequence
+       FROM accounts
+       WHERE id IN ($1, $2)
+       ORDER BY id ASC
+       FOR UPDATE`,
+      [SYSTEM_CASH_CLEARING_ID, accountId]
+    );
+
+    const clearingAccount = accountsResult.rows.find((r) => r.id === SYSTEM_CASH_CLEARING_ID);
+    if (!clearingAccount) {
+      await client.query('ROLLBACK');
+      client.release();
+      clientReleased = true;
+      return res.status(500).json({
+        error: 'ConfigurationError',
+        message: 'System cash clearing account is not provisioned',
+      });
+    }
+
+    const customerAccount = accountsResult.rows.find((r) => r.id === accountId);
+    if (!customerAccount) {
+      await client.query('ROLLBACK');
+      client.release();
+      clientReleased = true;
+
+      try {
+        await auditService.recordRefusalAudit({
+          userId: req.user.id,
+          attemptedAccountId: accountId,
+          accountExists: false,
+          action: 'deposit',
+          amountPaise,
+          reasonCode: 'ACCOUNT_NOT_FOUND',
+          reasonMessage: `Target account not found: ${accountId}`,
+          idempotencyKey: cleanKey,
+          clientIp: req.ip,
+        });
+      } catch (auditErr) {
+        return auditService.sendAuditPersistenceFailure(res, auditErr);
+      }
+
+      return res.status(404).json({
+        error: 'NotFoundError',
+        message: 'Target account not found',
+      });
+    }
+
+    // 6. Verify target account is a customer account (cannot deposit into system accounts)
+    if (customerAccount.account_type !== 'customer') {
+      await client.query('ROLLBACK');
+      client.release();
+      clientReleased = true;
+
+      try {
+        await auditService.recordRefusalAudit({
+          userId: req.user.id,
+          accountId: customerAccount.id,
+          accountExists: true,
+          action: 'deposit',
+          amountPaise,
+          reasonCode: 'INVALID_ACCOUNT_TYPE',
+          reasonMessage: `Cannot deposit into system account of type '${customerAccount.account_type}'`,
+          idempotencyKey: cleanKey,
+          clientIp: req.ip,
+        });
+      } catch (auditErr) {
+        return auditService.sendAuditPersistenceFailure(res, auditErr);
+      }
+
+      return res.status(422).json({
+        error: 'InvariantViolationError',
+        message: 'Cannot deposit into system accounts',
+      });
+    }
+
+    // 7. Authorization: Account holders can ONLY deposit into accounts they own
+    if (req.user.role === 'account_holder') {
+      if (!customerAccount.user_id || customerAccount.user_id !== req.user.id) {
+        await client.query('ROLLBACK');
+        client.release();
+        clientReleased = true;
+
+        try {
+          await auditService.recordRefusalAudit({
+            userId: req.user.id,
+            accountId: customerAccount.id,
+            accountExists: true,
+            action: 'deposit',
+            amountPaise,
+            reasonCode: 'FORBIDDEN_OWNERSHIP',
+            reasonMessage: 'Access denied: You are not authorized to deposit into this account',
+            idempotencyKey: cleanKey,
+            clientIp: req.ip,
+          });
+        } catch (auditErr) {
+          return auditService.sendAuditPersistenceFailure(res, auditErr);
+        }
+
+        return res.status(403).json({
+          error: 'ForbiddenError',
+          message: 'Access denied: You are not authorized to deposit into this account',
+        });
+      }
+    }
+
+    // 8. Capture sequences and update account balances atomically
+    const clearingSeq = BigInt(clearingAccount.next_entry_sequence);
+    const customerSeq = BigInt(customerAccount.next_entry_sequence);
+
+    // Debit clearing account: balance_paise = balance_paise - amountPaise
+    const updatedClearing = await client.query(
+      `UPDATE accounts
+       SET balance_paise = balance_paise - $1,
+           next_entry_sequence = next_entry_sequence + 1,
+           updated_at = NOW()
+       WHERE id = $2
+       RETURNING balance_paise, next_entry_sequence`,
+      [amountPaise.toString(), SYSTEM_CASH_CLEARING_ID]
+    );
+
+    // Credit customer account: balance_paise = balance_paise + amountPaise
+    const updatedCustomer = await client.query(
+      `UPDATE accounts
+       SET balance_paise = balance_paise + $1,
+           next_entry_sequence = next_entry_sequence + 1,
+           updated_at = NOW()
+       WHERE id = $2
+       RETURNING balance_paise, next_entry_sequence`,
+      [amountPaise.toString(), accountId]
+    );
+
+    // 9. Record transfer record (transfer_type='deposit')
+    const transferRecord = await client.query(
+      `INSERT INTO transfers (
+         source_account_id, destination_account_id, amount_paise, status, transfer_type, created_by_user_id
+       )
+       VALUES ($1, $2, $3, 'completed', 'deposit', $4)
+       RETURNING id, source_account_id, destination_account_id, amount_paise, status, transfer_type, created_by_user_id, created_at`,
+      [SYSTEM_CASH_CLEARING_ID, accountId, amountPaise.toString(), req.user.id]
+    );
+
+    const createdTransfer = transferRecord.rows[0];
+
+    // 10. Record double-entry ledger entries
+    // Clearing account debit entry
+    await client.query(
+      `INSERT INTO ledger_entries (
+         transfer_id, account_id, entry_type, amount_paise, balance_after_paise, account_entry_sequence
+       )
+       VALUES ($1, $2, 'debit', $3, $4, $5)`,
+      [
+        createdTransfer.id,
+        SYSTEM_CASH_CLEARING_ID,
+        amountPaise.toString(),
+        updatedClearing.rows[0].balance_paise,
+        clearingSeq.toString(),
+      ]
+    );
+
+    // Customer account credit entry
+    await client.query(
+      `INSERT INTO ledger_entries (
+         transfer_id, account_id, entry_type, amount_paise, balance_after_paise, account_entry_sequence
+       )
+       VALUES ($1, $2, 'credit', $3, $4, $5)`,
+      [
+        createdTransfer.id,
+        accountId,
+        amountPaise.toString(),
+        updatedCustomer.rows[0].balance_paise,
+        customerSeq.toString(),
+      ]
+    );
+
+    // 11. Prepare response body
+    const responseBody = {
+      message: 'Deposit completed successfully',
+      transfer: {
+        id: createdTransfer.id,
+        transferType: createdTransfer.transfer_type,
+        sourceAccountId: createdTransfer.source_account_id,
+        destinationAccountId: createdTransfer.destination_account_id,
+        amountPaise: createdTransfer.amount_paise.toString(),
+        status: createdTransfer.status,
+        createdByUserId: createdTransfer.created_by_user_id,
+        createdAt: createdTransfer.created_at,
+      },
+      account: {
+        id: accountId,
+        balancePaise: updatedCustomer.rows[0].balance_paise.toString(),
+        accountEntrySequence: customerSeq.toString(),
+      },
+    };
+
+    // 12. Update Idempotency Key to completed status
+    await client.query(
+      `UPDATE idempotency_keys
+       SET status = 'completed',
+           response_code = 201,
+           response_body = $1,
+           transfer_id = $2,
+           updated_at = NOW()
+       WHERE client_scope = $3 AND key = $4`,
+      [responseBody, createdTransfer.id, clientScope, cleanKey]
+    );
+
+    // 13. Commit transaction (evaluates deferred balancing trigger)
+    await client.query('COMMIT');
+
+    // 14. Return deposit confirmation
+    return res.status(201).json(responseBody);
+  } catch (err) {
+    if (!clientReleased) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (_) {}
+    }
+    next(err);
+  } finally {
+    if (!clientReleased) {
+      client.release();
+    }
+  }
+});
+
+/**
+ * @route   POST /api/transfers/withdraw
+ * @desc    Execute an idempotent cash withdrawal debiting customer account and crediting SYSTEM_CASH_CLEARING
+ * @access  Private (account_holder, admin)
+ */
+router.post('/withdraw', authenticateJWT, requireRole('admin', 'account_holder'), async (req, res, next) => {
+  // 1. Validate mandatory Idempotency-Key header
+  const idempotencyKey = req.header('Idempotency-Key');
+  if (!idempotencyKey || typeof idempotencyKey !== 'string' || idempotencyKey.trim().length === 0) {
+    return res.status(400).json({
+      error: 'ValidationError',
+      message: 'Idempotency-Key header is required for financial transactions',
+    });
+  }
+
+  const cleanKey = idempotencyKey.trim();
+
+  // 2. Validate request body (including BigInt range safety <= PG_MAX_BIGINT)
+  const parseResult = withdrawalSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
+      error: 'ValidationError',
+      details: parseResult.error.flatten().fieldErrors,
+    });
+  }
+
+  const { accountId, amountPaise } = parseResult.data;
+
+  // 3. Compute deterministic request hash and client_scope per source account
+  const canonicalPayload = JSON.stringify({
+    accountId,
+    amountPaise: amountPaise.toString(),
+    action: 'withdraw',
+  });
+  const requestHash = crypto.createHash('sha256').update(canonicalPayload).digest('hex');
+  const clientScope = `withdraw:${accountId}`;
+
+  const client = await pool.connect();
+  let clientReleased = false;
+
+  try {
+    // 4. Bounded, transaction-safe idempotency claim-and-resolve loop
+    const MAX_IDEMPOTENCY_ATTEMPTS = 3;
+    let idempotencyClaimed = false;
+
+    for (let attempt = 1; attempt <= MAX_IDEMPOTENCY_ATTEMPTS; attempt++) {
+      await client.query('BEGIN');
+
+      const insertKeyResult = await client.query(
+        `INSERT INTO idempotency_keys (client_scope, key, request_hash, status, created_at, updated_at)
+         VALUES ($1, $2, $3, 'processing', NOW(), NOW())
+         ON CONFLICT (client_scope, key) DO NOTHING
+         RETURNING key`,
+        [clientScope, cleanKey, requestHash]
+      );
+
+      if (insertKeyResult.rowCount === 1) {
+        idempotencyClaimed = true;
+        break;
+      }
+
+      const existingKeyResult = await client.query(
+        `SELECT client_scope, key, request_hash, status, response_code, response_body
+         FROM idempotency_keys
+         WHERE client_scope = $1 AND key = $2
+         FOR UPDATE`,
+        [clientScope, cleanKey]
+      );
+
+      const existing = existingKeyResult.rows[0];
+
+      if (!existing) {
+        await client.query('ROLLBACK');
+        continue;
+      }
+
+      if (existing.request_hash !== requestHash) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'IdempotencyConflictError',
+          message: 'Idempotency key has already been used with a different request payload',
+        });
+      }
+
+      if (existing.status === 'completed') {
+        await client.query('COMMIT');
+        res.setHeader('Idempotent-Replayed', 'true');
+        return res.status(existing.response_code || 201).json(existing.response_body);
+      }
+
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'ConcurrentRequestError',
+        message: 'A concurrent request with this idempotency key is already in progress',
+      });
+    }
+
+    if (!idempotencyClaimed) {
+      return res.status(503).json({
+        error: 'ConcurrencyConflictError',
+        message: 'Unable to acquire idempotency lock after multiple attempts; please retry',
+      });
+    }
+
+    // 5. Lock both accounts in deterministic order (ORDER BY id ASC) with SELECT ... FOR UPDATE
+    const accountsResult = await client.query(
+      `SELECT id, account_number, balance_paise, account_type, user_id, next_entry_sequence
+       FROM accounts
+       WHERE id IN ($1, $2)
+       ORDER BY id ASC
+       FOR UPDATE`,
+      [SYSTEM_CASH_CLEARING_ID, accountId]
+    );
+
+    const clearingAccount = accountsResult.rows.find((r) => r.id === SYSTEM_CASH_CLEARING_ID);
+    if (!clearingAccount) {
+      await client.query('ROLLBACK');
+      client.release();
+      clientReleased = true;
+      return res.status(500).json({
+        error: 'ConfigurationError',
+        message: 'System cash clearing account is not provisioned',
+      });
+    }
+
+    const customerAccount = accountsResult.rows.find((r) => r.id === accountId);
+    if (!customerAccount) {
+      await client.query('ROLLBACK');
+      client.release();
+      clientReleased = true;
+
+      try {
+        await auditService.recordRefusalAudit({
+          userId: req.user.id,
+          attemptedAccountId: accountId,
+          accountExists: false,
+          action: 'withdrawal',
+          amountPaise,
+          reasonCode: 'ACCOUNT_NOT_FOUND',
+          reasonMessage: `Target account not found: ${accountId}`,
+          idempotencyKey: cleanKey,
+          clientIp: req.ip,
+        });
+      } catch (auditErr) {
+        return auditService.sendAuditPersistenceFailure(res, auditErr);
+      }
+
+      return res.status(404).json({
+        error: 'NotFoundError',
+        message: 'Target account not found',
+      });
+    }
+
+    // 6. Verify target account is a customer account (cannot withdraw from system accounts)
+    if (customerAccount.account_type !== 'customer') {
+      await client.query('ROLLBACK');
+      client.release();
+      clientReleased = true;
+
+      try {
+        await auditService.recordRefusalAudit({
+          userId: req.user.id,
+          accountId: customerAccount.id,
+          accountExists: true,
+          action: 'withdrawal',
+          amountPaise,
+          reasonCode: 'INVALID_ACCOUNT_TYPE',
+          reasonMessage: `Cannot withdraw from system account of type '${customerAccount.account_type}'`,
+          idempotencyKey: cleanKey,
+          clientIp: req.ip,
+        });
+      } catch (auditErr) {
+        return auditService.sendAuditPersistenceFailure(res, auditErr);
+      }
+
+      return res.status(422).json({
+        error: 'InvariantViolationError',
+        message: 'Cannot withdraw from system accounts',
+      });
+    }
+
+    // 7. Authorization: Account holders can ONLY withdraw from accounts they own
+    if (req.user.role === 'account_holder') {
+      if (!customerAccount.user_id || customerAccount.user_id !== req.user.id) {
+        await client.query('ROLLBACK');
+        client.release();
+        clientReleased = true;
+
+        try {
+          await auditService.recordRefusalAudit({
+            userId: req.user.id,
+            accountId: customerAccount.id,
+            accountExists: true,
+            action: 'withdrawal',
+            amountPaise,
+            reasonCode: 'FORBIDDEN_OWNERSHIP',
+            reasonMessage: 'Access denied: You are not authorized to withdraw from this account',
+            idempotencyKey: cleanKey,
+            clientIp: req.ip,
+          });
+        } catch (auditErr) {
+          return auditService.sendAuditPersistenceFailure(res, auditErr);
+        }
+
+        return res.status(403).json({
+          error: 'ForbiddenError',
+          message: 'Access denied: You are not authorized to withdraw from this account',
+        });
+      }
+    }
+
+    // 8. Balance check: verify sender has sufficient funds using locked balance
+    const customerBalance = BigInt(customerAccount.balance_paise);
+    if (customerBalance < amountPaise) {
+      await client.query('ROLLBACK');
+      client.release();
+      clientReleased = true;
+
+      try {
+        await auditService.recordRefusalAudit({
+          userId: req.user.id,
+          accountId: customerAccount.id,
+          accountExists: true,
+          action: 'withdrawal',
+          amountPaise,
+          reasonCode: 'INSUFFICIENT_FUNDS',
+          reasonMessage: 'Sender has insufficient funds for this withdrawal',
+          idempotencyKey: cleanKey,
+          clientIp: req.ip,
+        });
+      } catch (auditErr) {
+        return auditService.sendAuditPersistenceFailure(res, auditErr);
+      }
+
+      return res.status(422).json({
+        error: 'InsufficientFundsError',
+        message: 'Sender has insufficient funds for this withdrawal',
+        currentBalancePaise: customerBalance.toString(),
+        attemptedAmountPaise: amountPaise.toString(),
+      });
+    }
+
+    // 9. Capture sequences and update account balances atomically
+    const customerSeq = BigInt(customerAccount.next_entry_sequence);
+    const clearingSeq = BigInt(clearingAccount.next_entry_sequence);
+
+    // Debit customer account with defense-in-depth conditional check (balance_paise >= $1)
+    const updatedCustomer = await client.query(
+      `UPDATE accounts
+       SET balance_paise = balance_paise - $1,
+           next_entry_sequence = next_entry_sequence + 1,
+           updated_at = NOW()
+       WHERE id = $2 AND balance_paise >= $1
+       RETURNING balance_paise, next_entry_sequence`,
+      [amountPaise.toString(), accountId]
+    );
+
+    if (updatedCustomer.rowCount !== 1) {
+      await client.query('ROLLBACK');
+      client.release();
+      clientReleased = true;
+
+      try {
+        await auditService.recordRefusalAudit({
+          userId: req.user.id,
+          accountId: customerAccount.id,
+          accountExists: true,
+          action: 'withdrawal',
+          amountPaise,
+          reasonCode: 'INSUFFICIENT_FUNDS',
+          reasonMessage: 'Sender has insufficient funds for this withdrawal',
+          idempotencyKey: cleanKey,
+          clientIp: req.ip,
+        });
+      } catch (auditErr) {
+        return auditService.sendAuditPersistenceFailure(res, auditErr);
+      }
+
+      return res.status(422).json({
+        error: 'InsufficientFundsError',
+        message: 'Sender has insufficient funds for this withdrawal',
+        currentBalancePaise: customerBalance.toString(),
+        attemptedAmountPaise: amountPaise.toString(),
+      });
+    }
+
+    // Credit clearing account: balance_paise = balance_paise + amountPaise
+    const updatedClearing = await client.query(
+      `UPDATE accounts
+       SET balance_paise = balance_paise + $1,
+           next_entry_sequence = next_entry_sequence + 1,
+           updated_at = NOW()
+       WHERE id = $2
+       RETURNING balance_paise, next_entry_sequence`,
+      [amountPaise.toString(), SYSTEM_CASH_CLEARING_ID]
+    );
+
+    // 10. Record transfer record (transfer_type='withdrawal')
+    const transferRecord = await client.query(
+      `INSERT INTO transfers (
+         source_account_id, destination_account_id, amount_paise, status, transfer_type, created_by_user_id
+       )
+       VALUES ($1, $2, $3, 'completed', 'withdrawal', $4)
+       RETURNING id, source_account_id, destination_account_id, amount_paise, status, transfer_type, created_by_user_id, created_at`,
+      [accountId, SYSTEM_CASH_CLEARING_ID, amountPaise.toString(), req.user.id]
+    );
+
+    const createdTransfer = transferRecord.rows[0];
+
+    // 11. Record double-entry ledger entries
+    // Customer account debit entry
+    await client.query(
+      `INSERT INTO ledger_entries (
+         transfer_id, account_id, entry_type, amount_paise, balance_after_paise, account_entry_sequence
+       )
+       VALUES ($1, $2, 'debit', $3, $4, $5)`,
+      [
+        createdTransfer.id,
+        accountId,
+        amountPaise.toString(),
+        updatedCustomer.rows[0].balance_paise,
+        customerSeq.toString(),
+      ]
+    );
+
+    // Clearing account credit entry
+    await client.query(
+      `INSERT INTO ledger_entries (
+         transfer_id, account_id, entry_type, amount_paise, balance_after_paise, account_entry_sequence
+       )
+       VALUES ($1, $2, 'credit', $3, $4, $5)`,
+      [
+        createdTransfer.id,
+        SYSTEM_CASH_CLEARING_ID,
+        amountPaise.toString(),
+        updatedClearing.rows[0].balance_paise,
+        clearingSeq.toString(),
+      ]
+    );
+
+    // 12. Prepare response body
+    const responseBody = {
+      message: 'Withdrawal completed successfully',
+      transfer: {
+        id: createdTransfer.id,
+        transferType: createdTransfer.transfer_type,
+        sourceAccountId: createdTransfer.source_account_id,
+        destinationAccountId: createdTransfer.destination_account_id,
+        amountPaise: createdTransfer.amount_paise.toString(),
+        status: createdTransfer.status,
+        createdByUserId: createdTransfer.created_by_user_id,
+        createdAt: createdTransfer.created_at,
+      },
+      account: {
+        id: accountId,
+        balancePaise: updatedCustomer.rows[0].balance_paise.toString(),
+        accountEntrySequence: customerSeq.toString(),
+      },
+    };
+
+    // 13. Update Idempotency Key to completed status
+    await client.query(
+      `UPDATE idempotency_keys
+       SET status = 'completed',
+           response_code = 201,
+           response_body = $1,
+           transfer_id = $2,
+           updated_at = NOW()
+       WHERE client_scope = $3 AND key = $4`,
+      [responseBody, createdTransfer.id, clientScope, cleanKey]
+    );
+
+    // 14. Commit transaction (evaluates deferred balancing trigger)
+    await client.query('COMMIT');
+
+    // 15. Return withdrawal confirmation
+    return res.status(201).json(responseBody);
+  } catch (err) {
+    if (!clientReleased) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (_) {}
+    }
+    next(err);
+  } finally {
+    if (!clientReleased) {
+      client.release();
+    }
   }
 });
 

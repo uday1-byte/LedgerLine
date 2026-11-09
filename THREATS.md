@@ -268,3 +268,52 @@ The current implementation of `POST /api/transfers` provides an initial working 
   - **Limitation (Known Residual Risk):** There is no database trigger on `public.accounts` that intercepts direct SQL balance updates or prevents an `UPDATE accounts SET balance_paise = ...` from executing without ledger entries if invoked directly as `ledgerline_app`.
   - **Trust Boundary:** The Express application is the authoritative security boundary responsible for coupling account balance updates with immutable double-entry ledger entries inside an atomic database transaction.
   - **Compensating Control:** Discrepancies between stored account balances (`accounts.balance_paise`) and balances reconstructed from historical ledger entries (`ledger_entries`)—accounting for opening-balance entries and compensating reversals—can be detected by periodic audit reconciliation queries.
+
+---
+
+## 8. Phase 6: Banking Functionality, Refusal Auditing & Account Statements
+
+### 8.1 Cash Deposits, Withdrawals & Cash Clearing Invariant
+* **Threat:** Cash operations enter or exit the platform as single-legged updates, breaking double-entry conservation and distorting system balance accounting.
+* **Mitigation:**
+  - Dedicated internal clearing account: `SYSTEM_CASH_CLEARING` (`00000000-0000-0000-0000-000000000002`, `account_type = 'system_clearing'`).
+  - Cash deposit: Debits `SYSTEM_CASH_CLEARING`, credits customer account.
+  - Cash withdrawal: Debits customer account, credits `SYSTEM_CASH_CLEARING`.
+  - Deferred constraint trigger `trg_verify_transfer_balance` validates that exactly two balanced ledger entries (one debit, one credit) match the transfer amount paise before transaction commit.
+  - Trigger `trg_prevent_account_ownership_reassignment` strictly prohibits assigning a user owner to `SYSTEM_CASH_CLEARING` on `INSERT` or `UPDATE`.
+
+### 8.2 Customer Overdraft Prevention & Safe Integer Arithmetic
+* **Threat:** High-concurrency withdrawal requests overdraw customer balances into negative amounts, or numeric overflow in 64-bit integers causes silent balance distortion.
+* **Mitigation:**
+  - PostgreSQL `BIGINT` range safety: Amounts exceeding $9{,}223{,}372{,}036{,}854{,}775{,}807$ (`PG_MAX_BIGINT`) or non-safe integers are rejected with HTTP 400 before database queries.
+  - Deterministic pessimistic row-locking (`ORDER BY id ASC FOR UPDATE`) serializes competing withdrawals.
+  - Defense-in-depth conditional database update: `UPDATE accounts SET balance_paise = balance_paise - $1 WHERE id = $2 AND balance_paise >= $1`. If rowCount is 0, the transaction immediately rolls back and records an audited refusal.
+
+### 8.3 Contiguous Per-Account Sequencing
+* **Threat:** Parallel transfers create ambiguous or interleaved entry orders for an account without a deterministic, tamper-evident sequence.
+* **Mitigation:**
+  - Per-account atomic counter: `accounts.next_entry_sequence` is read and incremented within the same transaction that updates balances and writes ledger entries.
+  - Partial unique index: `CREATE UNIQUE INDEX uq_ledger_entries_account_seq ON ledger_entries(account_id, account_entry_sequence) WHERE account_entry_sequence IS NOT NULL` guarantees unique, contiguous sequence numbers per account.
+  - Legacy preservation: Legacy Phase 1–5 ledger entries maintain `account_entry_sequence = NULL` without historical distortion.
+
+### 8.4 Concurrency & Deadlock Risk Reduction Disclaimer
+* **Threat:** Circular locking between concurrent transactions creates database deadlocks.
+* **Mitigation & Limitation:**
+  - All multi-account operations acquire locks in deterministic UUID order (`ORDER BY id ASC FOR UPDATE`).
+  - **Disclaimer:** Deterministic row-lock ordering significantly reduces pairwise deadlocks when concurrent transactions access the same accounts, but does not eliminate every possible deadlock scenario across complex multi-table transactions or under high database lock contention.
+
+### 8.5 Refusal Audit Persistence Policy
+* **Threat:** Financial refusal auditing leaks locks, fails silently on foreign-key errors, or falsely claims audit durability after insertion failures.
+* **Mitigation:**
+  - Rollback and release first: The financial database client is explicitly rolled back (`ROLLBACK`) and released to the connection pool before refusal auditing is attempted.
+  - Foreign-key protection on 404s: For nonexistent accounts, `account_id` is persisted as `NULL`, and the attempted account UUID is preserved in `reason_message`.
+  - Failure transparency: If audit persistence fails, the service returns HTTP 500 with `durableAudit: false`, emits a structured critical `stderr` JSON log, and never retries the financial operation.
+  - Immutability: Table `audit_refused_attempts` is append-only and protected by trigger `trg_prevent_audit_mutation` against `UPDATE` or `DELETE`. Anonymous 401 requests are never audited.
+
+### 8.6 Dual-Regime Statement Ordering & Pagination Shifting
+* **Threat:** Historical unsequenced ledger entries collide with post-cutover sequenced entries, or offset pagination produces inconsistent result sets.
+* **Mitigation & Limitation:**
+  - Total ordering SQL clause: Legacy entries (`sequence IS NULL`) are ordered chronologically by `created_at ASC, id ASC`; post-cutover entries are ordered strictly by `account_entry_sequence ASC, id ASC`.
+  - Legacy labeling: Legacy rows are explicitly tagged `regime: 'legacy_unsequenced'` with an explanatory historical note.
+  - Refused attempts isolation: Refused attempts reside in a separate response property and are included only when `include_refused=true`.
+  - **Pagination Limitation:** In an active ledger, offset pagination across separate requests can shift if concurrent transactions append new entries. This limitation is explicitly returned in `statement.pagination.note`.

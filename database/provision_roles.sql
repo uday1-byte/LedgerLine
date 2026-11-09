@@ -74,7 +74,18 @@ BEGIN
         REVOKE ALL ON TABLE public.accounts FROM ledgerline_app;
         GRANT SELECT ON TABLE public.accounts TO ledgerline_app;
         GRANT INSERT (account_number) ON TABLE public.accounts TO ledgerline_app;
-        GRANT UPDATE (balance_paise, updated_at, opening_balance_captured_at) ON TABLE public.accounts TO ledgerline_app;
+
+        -- Safe before and after Migration 006: check if next_entry_sequence column exists
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'accounts'
+              AND column_name = 'next_entry_sequence'
+        ) THEN
+            GRANT UPDATE (balance_paise, updated_at, opening_balance_captured_at, next_entry_sequence) ON TABLE public.accounts TO ledgerline_app;
+        ELSE
+            GRANT UPDATE (balance_paise, updated_at, opening_balance_captured_at) ON TABLE public.accounts TO ledgerline_app;
+        END IF;
     END IF;
 
     -- users
@@ -106,6 +117,14 @@ BEGIN
         ALTER TABLE public.idempotency_keys OWNER TO ledgerline_owner;
         REVOKE ALL ON TABLE public.idempotency_keys FROM PUBLIC;
         GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.idempotency_keys TO ledgerline_app;
+    END IF;
+
+    -- audit_refused_attempts
+    IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_refused_attempts') THEN
+        ALTER TABLE public.audit_refused_attempts OWNER TO ledgerline_owner;
+        REVOKE ALL ON TABLE public.audit_refused_attempts FROM PUBLIC;
+        REVOKE ALL ON TABLE public.audit_refused_attempts FROM ledgerline_app;
+        GRANT SELECT, INSERT ON TABLE public.audit_refused_attempts TO ledgerline_app;
     END IF;
 
     -- schema_migrations

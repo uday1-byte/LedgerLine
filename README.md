@@ -409,6 +409,132 @@ All administrative endpoints require `admin` role and delegate invariant enforce
   * `409 Conflict`: Transfer has already been reversed (enforced by partial unique index `idx_transfers_unique_reversal`).
   * `422 Unprocessable Entity`: Debited account has insufficient funds to reverse the transfer.
 
+### 7. Cash Deposits (Phase 6 Stage 5.2)
+* **Endpoint:** `POST /api/transfers/deposit`
+* **Access:** Private (`account_holder`, `admin`)
+* **Headers:**
+  * `Authorization: Bearer <jwt-token>` (Mandatory)
+  * `Idempotency-Key: <unique-client-key>` (Mandatory)
+* **Authorization Policy:**
+  * `account_holder` may only deposit into an account they personally own.
+  * `admin` may deposit into any customer account.
+* **Payload:**
+  ```json
+  {
+    "accountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+    "amountPaise": 50000
+  }
+  ```
+* **Success Response (201 Created):**
+  ```json
+  {
+    "message": "Deposit completed successfully",
+    "transfer": {
+      "id": "e4eebc99-9c0b-4ef8-bb6d-6bb9bd380a55",
+      "transferType": "deposit",
+      "sourceAccountId": "00000000-0000-0000-0000-000000000002",
+      "destinationAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+      "amountPaise": "50000",
+      "status": "completed",
+      "createdByUserId": "f5eebc99-9c0b-4ef8-bb6d-6bb9bd380a66",
+      "createdAt": "2026-11-09T08:00:00.000Z"
+    },
+    "account": {
+      "id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+      "balancePaise": "150000",
+      "accountEntrySequence": "1"
+    }
+  }
+  ```
+
+### 8. Cash Withdrawals (Phase 6 Stage 5.3)
+* **Endpoint:** `POST /api/transfers/withdraw`
+* **Access:** Private (`account_holder`, `admin`)
+* **Headers:**
+  * `Authorization: Bearer <jwt-token>` (Mandatory)
+  * `Idempotency-Key: <unique-client-key>` (Mandatory)
+* **Authorization Policy:**
+  * `account_holder` may only withdraw from an account they personally own.
+  * `admin` may withdraw from any customer account.
+* **Payload:**
+  ```json
+  {
+    "accountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+    "amountPaise": 20000
+  }
+  ```
+* **Success Response (201 Created):**
+  ```json
+  {
+    "message": "Withdrawal completed successfully",
+    "transfer": {
+      "id": "a1eebc99-9c0b-4ef8-bb6d-6bb9bd380a77",
+      "transferType": "withdrawal",
+      "sourceAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+      "destinationAccountId": "00000000-0000-0000-0000-000000000002",
+      "amountPaise": "20000",
+      "status": "completed",
+      "createdByUserId": "f5eebc99-9c0b-4ef8-bb6d-6bb9bd380a66",
+      "createdAt": "2026-11-09T08:15:00.000Z"
+    },
+    "account": {
+      "id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+      "balancePaise": "130000",
+      "accountEntrySequence": "2"
+    }
+  }
+  ```
+
+### 9. Account Statements (Phase 6 Stage 5.4)
+* **Endpoint:** `GET /api/accounts/:id/statement`
+* **Access:** Private (`account_holder`, `admin`, `auditor`)
+* **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
+* **Query Parameters (Optional):**
+  * `from_date`: ISO 8601 timestamp filter.
+  * `to_date`: ISO 8601 timestamp filter (must be $\ge \text{from\_date}$).
+  * `limit`: Integer (1-100, default 50).
+  * `offset`: Non-negative integer (default 0).
+  * `include_refused`: Boolean or string `"true"`/`"false"` (default `false`).
+* **Success Response (200 OK):**
+  ```json
+  {
+    "account": {
+      "id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+      "accountNumber": "ACC-1001",
+      "accountType": "customer",
+      "currentBalancePaise": "130000",
+      "phase6CutoverBalancePaise": "100000",
+      "phase6CutoverCapturedAt": "2026-11-09T07:50:00.000Z",
+      "nextEntrySequence": "3"
+    },
+    "statement": {
+      "entries": [
+        {
+          "id": "b2eebc99-9c0b-4ef8-bb6d-6bb9bd380a88",
+          "transferId": "e4eebc99-9c0b-4ef8-bb6d-6bb9bd380a55",
+          "transferType": "deposit",
+          "entryType": "credit",
+          "amountPaise": "50000",
+          "balanceAfterPaise": "150000",
+          "accountEntrySequence": "1",
+          "regime": "sequenced",
+          "createdAt": "2026-11-09T08:00:00.000Z",
+          "initiatedBy": {
+            "userId": "f5eebc99-9c0b-4ef8-bb6d-6bb9bd380a66",
+            "username": "customer_alice"
+          }
+        }
+      ],
+      "pagination": {
+        "totalEntries": 1,
+        "limit": 50,
+        "offset": 0,
+        "note": "Offset pagination applies over the dual-regime total ordering. In an active ledger, offset pagination across separate requests can shift if concurrent transactions append new entries."
+      }
+    }
+  }
+  ```
+
 ---
 
 ## 🔒 Database Roles & Security Architecture
@@ -417,7 +543,7 @@ All administrative endpoints require `admin` role and delegate invariant enforce
 LedgerLine uses a simplified, least-privilege two-role architecture (`database/provision_roles.sql`):
 
 1. **`ledgerline_owner` (Migration & Schema Owner):**
-   - Owns the `public` schema and all tables (`users`, `accounts`, `transfers`, `ledger_entries`, `idempotency_keys`, `schema_migrations`).
+   - Owns the `public` schema and all tables (`users`, `accounts`, `transfers`, `ledger_entries`, `idempotency_keys`, `audit_refused_attempts`, `schema_migrations`).
    - Owns all `SECURITY DEFINER` administrative functions.
    - Used exclusively to run migrations (`npm run migrate:backend`) and initial admin bootstrap (`npm run seed:admin`).
    - Not used to handle normal application HTTP traffic.
@@ -425,8 +551,8 @@ LedgerLine uses a simplified, least-privilege two-role architecture (`database/p
    - Used by the Node.js Express server to handle application traffic.
    - **No Table Ownership:** Cannot alter schemas or disable database triggers.
    - **No Truncate Privileges:** Cannot truncate any financial tables.
-   - **Strict Append-Only Enforcement:** Granted only `SELECT, INSERT` on `transfers` and `ledger_entries` (no UPDATE or DELETE privileges).
-   - **Column-Level Privileges on Accounts:** Granted `SELECT`, column-level `INSERT (account_number)`, and column-level `UPDATE (balance_paise, updated_at, opening_balance_captured_at)`. Cannot directly alter account ownership (`user_id`).
+   - **Strict Append-Only Enforcement:** Granted only `SELECT, INSERT` on `transfers`, `ledger_entries`, and `audit_refused_attempts` (no UPDATE or DELETE privileges).
+   - **Column-Level Privileges on Accounts:** Granted `SELECT`, column-level `INSERT (account_number)`, and column-level `UPDATE (balance_paise, updated_at, opening_balance_captured_at, next_entry_sequence)`. Cannot directly alter account ownership (`user_id`).
    - **Column-Level Privileges on Users:** Granted `SELECT`, column-level `INSERT (username, email, password_hash)`, and column-level `UPDATE (password_hash, updated_at)`. Cannot directly alter user roles (`role`) or active status (`is_active`).
    - **Accounts Privileges & Trust Boundary:** The Express application coordinates balance updates and ledger entries within atomic transactions. Note that while the deferred database constraint trigger validates that ledger entries associated with transfer records are balanced, direct SQL balance updates are not blocked by an accounts-level trigger.
    - Attempted UPDATE or DELETE operations on ledger entries are blocked both by permission grants and by database triggers (`LL007`). There are no session-level backdoors.
@@ -451,7 +577,7 @@ npm run test:backend
 - Each test generates uniquely keyed account records (`TEST-SRC-...`, `CONC-SRC-...`, `DET-SRC-...`, `LEDGER-SRC-...`, `RBAC-...`).
 - The database contains no test cleanup bypasses. Real application requests connect through `ledgerline_app`. Privileged fixtures strictly use `ownerPool` (`ledgerline_owner`) for test setup.
 
-**Test Suites (66 automated tests across 7 suites):**
+**Test Suites (129 automated tests across 11 suites):**
 1. `tests/health.test.js` (3 tests): Health check endpoints and 404 routing.
 2. `tests/transfers.test.js` (7 tests): Mandatory idempotency key validation, balance updates, debit/credit ledger verification, insufficient funds rejection, and input validations.
 3. `tests/concurrency.test.js` (1 test): Live race condition test demonstrating overdraft prevention under concurrent requests.
@@ -459,6 +585,10 @@ npm run test:backend
 5. `tests/ledger.test.js` (15 tests): Full double-entry balanced ledger verification, immutability triggers, opening balance zero-sum cutover, and compensating reversals.
 6. `tests/auth.test.js` (13 tests): Authentication foundation, bcrypt work factor 12 hashing, timing-attack prevention, JWT issuance and verification, dynamic database role reflection, and user deactivation enforcement.
 7. `tests/rbac.test.js` (26 tests): Account ownership isolation, IDOR prevention, auditor read-only restrictions, admin creation/assignment/role/status operations, last-active-admin protection, concurrent mutual demotion race protection, ownership immutability, and system equity protection.
+8. `tests/audit.test.js` (10 tests): Refusal-attempt audit service, action validation, nonexistent 404 account FK safety (`account_id = NULL`), anonymous 401 rejection, failure handling with `durableAudit: false`, rollback/client-release ordering, and immutability triggers.
+9. `tests/deposits.test.js` (15 tests): Cash deposits double-entry balancing against `SYSTEM_CASH_CLEARING`, BigInt precision, amount validation, RBAC ownership, idempotency replay/conflict, contiguous sequence allocation under concurrency, and failure handling.
+10. `tests/withdrawals.test.js` (16 tests): Cash withdrawals double-entry balancing, BigInt upper-bound validation (`PG_MAX_BIGINT`), non-negative balance enforcement, defense-in-depth conditional updates, deterministic locking, idempotency, and refusal auditing.
+11. `tests/statements.test.js` (22 tests): Dual-regime statement ordering (legacy unsequenced vs sequenced), cutover snapshot metadata, RBAC ownership isolation, refused attempts separation and 404 notice, ISO 8601 date range filtering/validation, offset pagination determinism, and zero-mutation database guarantees.
 
 ---
 
@@ -468,4 +598,4 @@ npm run test:backend
 - [x] **Phase 2 Hardening & Phase 3: Concurrency Protection (`SELECT ... FOR UPDATE`), Row-Level Serialization & Regression Proof**
 - [x] **Phase 4: Full Double-Entry Balanced Ledger Engine, Append-Only Triggers, Idempotency & Reversals**
 - [x] **Phase 5: User Authentication & Role-Based Authorization**
-- [ ] **Phase 6: Financial Reporting, Running Statements & UI Integration**
+- [x] **Phase 6: Banking Functionality, Cash Invariants, Refusal Auditing & Account Statements**

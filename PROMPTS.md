@@ -581,3 +581,56 @@ npm.cmd --prefix backend test -- --runInBand
 - `tests/auth.test.js`: 13 passed, 0 failed
 - `tests/rbac.test.js`: 26 passed, 0 failed
 - **Total:** 7 test suites passed, 66 tests passed, 0 failed, 0 skipped.
+
+---
+
+## Phase 6: Complete Banking Functionality & Financial Reporting (2026-11-09)
+
+### Summary of Requests & Objectives
+1. **Phase 6 Stage 1: Banking Requirements Definition:**
+   - Define system clearing account `SYSTEM_CASH_CLEARING` (`00000000-0000-0000-0000-000000000002`).
+   - Define contiguous per-account sequence numbering (`next_entry_sequence`) and cutover baseline snapshot (`phase6_cutover_balance_paise`, `phase6_cutover_captured_at`).
+   - Define append-only refusal audit trail (`audit_refused_attempts`).
+   - Define double-entry cash deposits and withdrawals.
+   - Define dual-regime account statements (legacy unsequenced vs sequenced).
+2. **Phase 6 Stage 2: Read-Only Preflight Verification:**
+   - Implement `backend/src/scripts/preflight_006.js` validating schema prerequisites, configuration consistency, constraint definitions, and system clearing account state on `ledgerline_test`.
+3. **Phase 6 Stage 3: Schema Migration 006:**
+   - Author `database/migrations/006_complete_banking_functionality.sql` and update `database/provision_roles.sql`.
+   - Apply forward-only migration adding `next_entry_sequence`, `account_entry_sequence`, cutover snapshots, `audit_refused_attempts`, and ownership immutability triggers.
+4. **Phase 6 Stage 4: Post-Migration Schema Verification:**
+   - Verify table schemas, column grants, triggers, and indices.
+5. **Phase 6 Stage 5.1: Shared Refusal-Audit Service:**
+   - Implement `backend/src/services/auditService.js` and `backend/tests/audit.test.js`.
+   - Enforce rollback-release-audit ordering, 404 nonexistent account FK safety (`account_id = NULL`), anonymous 401 exclusion, and `durableAudit: false` failure handling.
+6. **Phase 6 Stage 5.2: Cash Deposits (`POST /api/transfers/deposit`):**
+   - Create balanced double-entry transactions (debit `SYSTEM_CASH_CLEARING`, credit customer).
+   - Enforce BigInt-safe amount parsing, deterministic row locking, atomic sequencing, and Phase 4 idempotency replay.
+7. **Phase 6 Stage 5.3: Cash Withdrawals (`POST /api/transfers/withdraw`):**
+   - Create balanced double-entry transactions (debit customer, credit `SYSTEM_CASH_CLEARING`).
+   - Validate PostgreSQL `BIGINT` range safety (`PG_MAX_BIGINT`), non-negative customer balance, defense-in-depth conditional updates (`balance_paise >= $1`), and refusal auditing.
+8. **Phase 6 Stage 5.4: Account Statements (`GET /api/accounts/:id/statement`):**
+   - Read-only endpoint returning account cutover snapshot, current balance, and dual-regime total ordering.
+   - Separate completed entries and refused attempts (included only when `include_refused=true`).
+   - Validate date ranges (`from_date <= to_date`) and pagination parameters.
+
+### Final Test Suite Verification
+The complete backend Jest test suite was executed against `ledgerline_test`:
+```cmd
+set "DB_NAME=ledgerline_test"
+npm.cmd --prefix backend test -- --runInBand
+```
+
+**Final Test Results (Exit Code 0):**
+- `tests/health.test.js`: 3 passed, 0 failed
+- `tests/transfers.test.js`: 7 passed, 0 failed
+- `tests/concurrency.test.js`: 1 passed, 0 failed
+- `tests/deterministic-concurrency.test.js`: 1 passed, 0 failed
+- `tests/ledger.test.js`: 15 passed, 0 failed
+- `tests/auth.test.js`: 13 passed, 0 failed
+- `tests/rbac.test.js`: 26 passed, 0 failed
+- `tests/audit.test.js`: 10 passed, 0 failed
+- `tests/deposits.test.js`: 15 passed, 0 failed
+- `tests/withdrawals.test.js`: 16 passed, 0 failed
+- `tests/statements.test.js`: 22 passed, 0 failed
+- **Total:** 11 test suites passed, 129 tests passed, 0 failed, 0 skipped.

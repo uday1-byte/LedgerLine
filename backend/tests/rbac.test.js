@@ -445,7 +445,7 @@ describe('Phase 5 Step 2: Role-Based Access Control (RBAC) & Account Ownership',
 
       expect(res.status).toBe(422);
       expect(res.body.error).toBe('InvariantViolationError');
-      expect(res.body.message).toMatch(/Cannot assign user ownership to system equity account/i);
+      expect(res.body.message).toMatch(/Cannot assign user ownership to system[_ ]equity account/i);
     });
 
     it('rejects assigning an account to an inactive user (422)', async () => {
