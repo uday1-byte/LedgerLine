@@ -1,4 +1,4 @@
-﻿const request = require('supertest');
+const request = require('supertest');
 const app = require('../src/app');
 const { pool } = require('../src/config/db');
 const { createTestUser, createTestAccount, ownerPool } = require('./helpers/auth');
@@ -173,17 +173,24 @@ describe('GET /api/accounts/:id/statement - Account Statements (Phase 6 Stage 5.
 
   describe('3. Dual-Regime Total Ordering (Legacy vs Sequenced Entries)', () => {
     let orderedAccount;
+    let counterpartyAccount;
     let legacyEntry1;
     let legacyEntry2;
     let sequencedEntry1;
     let sequencedEntry2;
 
     beforeAll(async () => {
-      // Create dedicated account for ordering verification
+      // Create dedicated ephemeral accounts for ordering verification
       orderedAccount = await createTestAccount({
         accountNumber: `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
         balancePaise: 500000,
         userId: customerUser1.user.id,
+      });
+
+      counterpartyAccount = await createTestAccount({
+        accountNumber: `ORD-CP-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        balancePaise: 500000,
+        userId: customerUser2.user.id,
       });
 
       const client = await ownerPool.connect();
@@ -195,7 +202,7 @@ describe('GET /api/accounts/:id/statement - Account Statements (Phase 6 Stage 5.
           `INSERT INTO public.transfers (source_account_id, destination_account_id, amount_paise, status, transfer_type, created_by_user_id, created_at)
            VALUES ($1, $2, $3, 'completed', 'customer_transfer', $4, '2026-01-01T10:00:00Z')
            RETURNING id`,
-          [orderedAccount.id, customerAccount2.id, 5000n, customerUser1.user.id]
+          [orderedAccount.id, counterpartyAccount.id, 5000n, customerUser1.user.id]
         );
         const t1Id = t1Res.rows[0].id;
         const le1Res = await client.query(
@@ -208,7 +215,7 @@ describe('GET /api/accounts/:id/statement - Account Statements (Phase 6 Stage 5.
         await client.query(
           `INSERT INTO public.ledger_entries (transfer_id, account_id, entry_type, amount_paise, balance_after_paise, account_entry_sequence, created_at)
            VALUES ($1, $2, 'credit', $3, $4, NULL, '2026-01-01T10:00:00Z')`,
-          [t1Id, customerAccount2.id, 5000n, 205000n]
+          [t1Id, counterpartyAccount.id, 5000n, 505000n]
         );
 
         // Insert legacy transfer 2 (unsequenced: sequence = NULL) at timestamp T2
@@ -216,7 +223,7 @@ describe('GET /api/accounts/:id/statement - Account Statements (Phase 6 Stage 5.
           `INSERT INTO public.transfers (source_account_id, destination_account_id, amount_paise, status, transfer_type, created_by_user_id, created_at)
            VALUES ($1, $2, $3, 'completed', 'customer_transfer', $4, '2026-01-02T10:00:00Z')
            RETURNING id`,
-          [orderedAccount.id, customerAccount2.id, 3000n, customerUser1.user.id]
+          [orderedAccount.id, counterpartyAccount.id, 3000n, customerUser1.user.id]
         );
         const t2Id = t2Res.rows[0].id;
         const le2Res = await client.query(
@@ -229,28 +236,21 @@ describe('GET /api/accounts/:id/statement - Account Statements (Phase 6 Stage 5.
         await client.query(
           `INSERT INTO public.ledger_entries (transfer_id, account_id, entry_type, amount_paise, balance_after_paise, account_entry_sequence, created_at)
            VALUES ($1, $2, 'credit', $3, $4, NULL, '2026-01-02T10:00:00Z')`,
-          [t2Id, customerAccount2.id, 3000n, 208000n]
+          [t2Id, counterpartyAccount.id, 3000n, 508000n]
         );
 
-        // Get next entry sequence for clearing account
-        const clrRes = await client.query(
-          `SELECT next_entry_sequence FROM public.accounts WHERE id = $1 FOR UPDATE`,
-          [SYSTEM_CASH_CLEARING_ID]
-        );
-        const clrSeq = BigInt(clrRes.rows[0].next_entry_sequence);
-
-        // Insert sequenced transfer 1 (sequenced: sequence = 1) at timestamp T3
+        // Insert sequenced transfer 1 (sequenced: sequence = 1 on orderedAccount) at timestamp T3
         const t3Res = await client.query(
           `INSERT INTO public.transfers (source_account_id, destination_account_id, amount_paise, status, transfer_type, created_by_user_id, created_at)
-           VALUES ($1, $2, $3, 'completed', 'deposit', $4, '2026-01-03T10:00:00Z')
+           VALUES ($1, $2, $3, 'completed', 'customer_transfer', $4, '2026-01-03T10:00:00Z')
            RETURNING id`,
-          [SYSTEM_CASH_CLEARING_ID, orderedAccount.id, 10000n, adminUser.user.id]
+          [counterpartyAccount.id, orderedAccount.id, 10000n, adminUser.user.id]
         );
         const t3Id = t3Res.rows[0].id;
         await client.query(
           `INSERT INTO public.ledger_entries (transfer_id, account_id, entry_type, amount_paise, balance_after_paise, account_entry_sequence, created_at)
-           VALUES ($1, $2, 'debit', $3, $4, $5, '2026-01-03T10:00:00Z')`,
-          [t3Id, SYSTEM_CASH_CLEARING_ID, 10000n, -10000n, clrSeq]
+           VALUES ($1, $2, 'debit', $3, $4, 1, '2026-01-03T10:00:00Z')`,
+          [t3Id, counterpartyAccount.id, 10000n, 498000n]
         );
         const le3Res = await client.query(
           `INSERT INTO public.ledger_entries (transfer_id, account_id, entry_type, amount_paise, balance_after_paise, account_entry_sequence, created_at)
@@ -260,12 +260,12 @@ describe('GET /api/accounts/:id/statement - Account Statements (Phase 6 Stage 5.
         );
         sequencedEntry1 = le3Res.rows[0];
 
-        // Insert sequenced transfer 2 (sequenced: sequence = 2) at timestamp T4
+        // Insert sequenced transfer 2 (sequenced: sequence = 2 on orderedAccount) at timestamp T4
         const t4Res = await client.query(
           `INSERT INTO public.transfers (source_account_id, destination_account_id, amount_paise, status, transfer_type, created_by_user_id, created_at)
-           VALUES ($1, $2, $3, 'completed', 'withdrawal', $4, '2026-01-04T10:00:00Z')
+           VALUES ($1, $2, $3, 'completed', 'customer_transfer', $4, '2026-01-04T10:00:00Z')
            RETURNING id`,
-          [orderedAccount.id, SYSTEM_CASH_CLEARING_ID, 2000n, customerUser1.user.id]
+          [orderedAccount.id, counterpartyAccount.id, 2000n, customerUser1.user.id]
         );
         const t4Id = t4Res.rows[0].id;
         const le4Res = await client.query(
@@ -277,19 +277,20 @@ describe('GET /api/accounts/:id/statement - Account Statements (Phase 6 Stage 5.
         sequencedEntry2 = le4Res.rows[0];
         await client.query(
           `INSERT INTO public.ledger_entries (transfer_id, account_id, entry_type, amount_paise, balance_after_paise, account_entry_sequence, created_at)
-           VALUES ($1, $2, 'credit', $3, $4, $5, '2026-01-04T10:00:00Z')`,
-          [t4Id, SYSTEM_CASH_CLEARING_ID, 2000n, -8000n, clrSeq + 1n]
-        );
-
-        await client.query(
-          `UPDATE public.accounts SET next_entry_sequence = $1 WHERE id = $2`,
-          [clrSeq + 2n, SYSTEM_CASH_CLEARING_ID]
+           VALUES ($1, $2, 'credit', $3, $4, 2, '2026-01-04T10:00:00Z')`,
+          [t4Id, counterpartyAccount.id, 2000n, 500000n]
         );
 
         // Update orderedAccount balance and sequence to match
         await client.query(
           `UPDATE public.accounts SET balance_paise = 500000, next_entry_sequence = 3 WHERE id = $1`,
           [orderedAccount.id]
+        );
+
+        // Update counterpartyAccount balance and sequence to match
+        await client.query(
+          `UPDATE public.accounts SET balance_paise = 500000, next_entry_sequence = 3 WHERE id = $1`,
+          [counterpartyAccount.id]
         );
 
         await client.query('COMMIT');
@@ -335,7 +336,7 @@ describe('GET /api/accounts/:id/statement - Account Statements (Phase 6 Stage 5.
       expect(entries[2].historicalNote).toBeUndefined();
       expect(entries[2].entryType).toBe('credit');
       expect(entries[2].amountPaise).toBe('10000');
-      expect(entries[2].transferType).toBe('deposit');
+      expect(entries[2].transferType).toBe('customer_transfer');
       expect(entries[2].initiatedBy.userId).toBe(adminUser.user.id);
 
       // Entry 3: sequenced entry 2
@@ -345,7 +346,7 @@ describe('GET /api/accounts/:id/statement - Account Statements (Phase 6 Stage 5.
       expect(entries[3].historicalNote).toBeUndefined();
       expect(entries[3].entryType).toBe('debit');
       expect(entries[3].amountPaise).toBe('2000');
-      expect(entries[3].transferType).toBe('withdrawal');
+      expect(entries[3].transferType).toBe('customer_transfer');
       expect(entries[3].initiatedBy.userId).toBe(customerUser1.user.id);
     });
   });
