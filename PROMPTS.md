@@ -634,3 +634,88 @@ npm.cmd --prefix backend test -- --runInBand
 - `tests/withdrawals.test.js`: 16 passed, 0 failed
 - `tests/statements.test.js`: 22 passed, 0 failed
 - **Total:** 11 test suites passed, 129 tests passed, 0 failed, 0 skipped.
+
+
+---
+
+## Phase 7: Frontend Banking Client Application, Vitest Suite & Readiness Audit (2026-11-09)
+
+### Summary of Requests & Objectives
+1. **Phase 7 Stage 1: API Client, Authentication Context & Route Infrastructure:**
+   - Implement centralized API client (`frontend/src/api/client.js`) with Bearer token injection, automatic 401 session clearing, and error classification distinguishing definitive business errors from ambiguous network outcomes.
+   - Implement `AuthContext` (`frontend/src/context/AuthContext.jsx`) managing in-memory session token with tab-scoped fallback to `sessionStorage` (`ledgerline_session_token`), avoiding persistent `localStorage`.
+   - Implement `ProtectedRoute` (`frontend/src/components/common/ProtectedRoute.jsx`) and client router with eight routes across public and role-protected pathways.
+2. **Phase 7 Stage 2: Authentication Screens:**
+   - Implement `LoginPage` (`frontend/src/pages/LoginPage.jsx`) and `RegisterPage` (`frontend/src/pages/RegisterPage.jsx`).
+   - Enforce backend password complexity rules (minimum 8 chars, 1 letter, 1 number) on registration before dispatch.
+3. **Phase 7 Stage 3: Account Dashboard:**
+   - Implement `DashboardPage` (`frontend/src/pages/DashboardPage.jsx`), `AccountCard`, and `AccountSummary`.
+   - Implement `frontend/src/utils/currency.js` providing zero floating-point arithmetic using native `BigInt` for parsing and formatting integer paise into Indian Rupees (`en-IN`).
+4. **Phase 7 Stage 4: Transfers, Deposits & Cash Operations UI:**
+   - Implement `TransfersPage` (`frontend/src/pages/TransfersPage.jsx`) with dedicated forms: `TransferForm`, `DepositForm`, `WithdrawForm`.
+   - Enforce pre-flight review modal (`ConfirmationModal.jsx`) requiring explicit confirmation before mutating calls.
+   - Generate client idempotency keys (`TRF-...`, `DEP-...`, `WDR-...`).
+   - Restrict account selection strictly to customer accounts; system clearing accounts are omitted from customer dropdowns.
+   - Handle ambiguous network outcomes (HTTP 0, 502–504, 409 ConcurrentRequestError) by preserving the unresolved idempotency key and payload in `sessionStorage` and displaying `PendingOperationBanner`, enabling safe retries without double-charging.
+5. **Phase 7 Stage 5: Account Statements UI:**
+   - Implement `StatementsPage` (`frontend/src/pages/StatementsPage.jsx`), `StatementFilterBar`, `StatementTable`, and `RefusedAttemptsTable`.
+   - Implement explicit timezone selection in `frontend/src/utils/date.js`: UTC mode (bounding calendar dates to `00:00:00.000Z` and `23:59:59.999Z`) vs. LOCAL browser timezone mode (deriving local calendar boundaries and converting to full UTC ISO with offset, satisfying backend Zod validation).
+   - Render dual-regime statement ordering: legacy entries with `historicalNote` followed by Phase 6 sequenced entries.
+   - Provide clean, printable statement layout omitting navigation and separating refused attempts.
+6. **Phase 7 Stage 6: Administrative & Auditor Portals:**
+   - Implement `AdminPortalPage` (`frontend/src/pages/AdminPortalPage.jsx`): zero-balance account creation (`POST /api/accounts`), immutable ownership assignment (`POST /api/admin/accounts/:id/owner`), and role/status governance with explicit confirmation and last-active-admin (`422`) handling.
+   - Implement `AuditorPortalPage` (`frontend/src/pages/AuditorPortalPage.jsx`): strictly read-only ledger overview and direct statement inspection links. Auditors are barred from mutating forms and transfer navigation.
+
+---
+
+### Key Engineering Decisions & Defect Investigations
+
+1. **Dual-Regime Test Fixture Isolation (Backend Test Adjustment):**
+   - **Issue:** `backend/tests/statements.test.js` Section 3 mutated the global singleton system account `SYSTEM_CASH_CLEARING` (`00000000-0000-0000-0000-000000000002`) during total-ordering verification, causing sequence side-effects on subsequent tests.
+   - **Correction:** Refactored the test fixture to create an isolated ephemeral `counterpartyAccount` for `customerUser2`, preserving `orderedAccount` sequences while leaving the shared clearing account untouched.
+   - **Commit:** Recorded as `3f6cc3c`.
+
+2. **React `act(...)` Warning in `transfers.test.jsx`:**
+   - **Defect:** In `frontend/src/test/transfers.test.jsx`, the test `"blocks auditor profile from accessing or submitting mutations"` was declared synchronously (`() => { ... }`) with `api.get` unmocked. `TransfersPage`'s mount hook (`useEffect -> fetchAccounts()`) resolved its promise and triggered React state updates after the synchronous assertions had returned, generating a React 18 `act(...)` warning in stderr.
+   - **Resolution:** Mocked `api.get` with `vi.spyOn(api, 'get').mockResolvedValue({ accounts: [] })`, made the test `async`, and wrapped the expectation in `await waitFor(...)`. All three assertions were strictly preserved without weakening. Resulted in 0 warnings.
+
+3. **Admin Ownership Route Contract Alignment:**
+   - **Audit Check:** Verified the ownership assignment endpoint in `AssignOwnerModal.jsx` and `admin.test.jsx` against backend `admin.js`. Both codebases consistently use `POST /api/admin/accounts/:id/owner`.
+
+4. **Vite Semver Range vs. Installed Version:**
+   - **Audit Check:** Resolved discrepancy between `package.json` (`"vite": "^6.2.0"`) and build output (`vite v6.4.5`). The caret allowed npm to install and lock `6.4.5` in `package-lock.json`, which executed the production build.
+
+---
+
+### Three-Stage Git Commit Strategy & Execution
+
+To preserve separation between backend test adjustments, frontend dependencies, and frontend application code, three targeted commits were executed:
+
+1. **Commit 1 (`3f6cc3c`):**
+   - *Message:* `test(backend): isolate statement ordering fixtures`
+   - *Scope:* `backend/tests/statements.test.js` (+30, -29 lines).
+2. **Commit 2 (`f652a7d`):**
+   - *Message:* `build(frontend): add testing and routing dependencies`
+   - *Scope:* `frontend/package.json`, `frontend/package-lock.json`, `frontend/vite.config.js` (+1122, -15 lines).
+3. **Commit 3 (`89417c7`):**
+   - *Message:* `feat(frontend): complete LedgerLine banking client application`
+   - *Scope:* 47 files across `frontend/src/` (+10198, -175 lines).
+
+---
+
+### Final Verification Results
+
+1. **Backend Test Suite Execution (`npm.cmd --prefix backend test`):**
+   - Target database: `ledgerline_test`
+   - Results: **11 passed, 11 total** (129 tests passed, 0 failures, 54.787 s).
+2. **Frontend Test Suite Execution (`npm.cmd --prefix frontend test -- --run`):**
+   - Runner: Vitest v5.1.0 with JSDOM
+   - Results: **10 passed, 10 total** (115 tests passed, 0 failures, 0 warnings, 11.43 s).
+   - Test files: `admin.test.jsx` (9), `apiClient.test.js` (8), `auditor.test.jsx` (3), `authContext.test.jsx` (4), `authScreens.test.jsx` (20), `currency.test.js` (17), `dashboard.test.jsx` (17), `protectedRoute.test.jsx` (5), `statements.test.jsx` (20), `transfers.test.jsx` (12).
+3. **Combined Project Test Suite:**
+   - **244 passed, 244 total (129 backend + 115 frontend), 0 failures.**
+4. **Frontend Production Build (`npm.cmd --prefix frontend run build`):**
+   - Output: `dist/index.html` (0.63 kB), `dist/assets/index-D2FUEpWX.css` (1.44 kB), `dist/assets/index-DL91vskZ.js` (325.93 kB).
+   - Results: 73 modules transformed, **0 errors, 0 warnings** (built in 2.48 s).
+5. **Git Repository Status:**
+   - The three commits 3f6cc3c, f652a7d and 89417c7 were successfully pushed to origin/main. The branch was subsequently verified synchronized with the remote and the working tree clean.

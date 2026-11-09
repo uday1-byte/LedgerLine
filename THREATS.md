@@ -1,319 +1,343 @@
-# LedgerLine - Threat Model & Security Architecture
+# 🛡️ LedgerLine — Threat Model & Security Architecture
 
-## 1. Executive Summary
-LedgerLine is a financial ledger application. In financial systems, integrity, auditability, and immutability are paramount. A single undetected data tampering incident or calculation flaw can cause significant monetary loss, compliance breaches, or loss of customer trust.
+This document provides a comprehensive threat analysis for the LedgerLine financial application using the **STRIDE** methodology (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege) combined with banking domain-specific failure mode analysis.
 
-This document uses the **STRIDE** methodology (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege) to identify security risks and define mitigation strategies for LedgerLine.
-
----
-
-## 2. Financial Domain Specific Threats & Mitigations
-
-### 2.1 Double-Spending & Race Conditions
-* **Threat:** A user submits two concurrent transfer requests against the same account before balance checks complete, resulting in an overdraft or balance inconsistency.
-* **Mitigation:**
-  - Enforce atomic database transactions (`BEGIN ... COMMIT / ROLLBACK`) with strict isolation levels.
-  - Use pessimistic row-level locking (`SELECT ... FOR UPDATE`) on account balance records during transaction processing.
-  - Implement client idempotency keys (`Idempotency-Key` HTTP header) stored in an idempotency table to ensure identical requests cannot be processed more than once.
-
-### 2.2 Floating-Point Arithmetic Rounding Errors
-* **Threat:** Standard JavaScript numbers (`Number`) are IEEE 754 double-precision floats, leading to inaccuracies such as `0.1 + 0.2 === 0.30000000000000004`. Over time or across high volumes, this leads to ledger imbalances and rounding arbitrage.
-* **Mitigation:**
-  - Never store or calculate monetary amounts as floating-point numbers.
-  - Store monetary values in PostgreSQL as `BIGINT` (representing minor currency units, e.g., integer paise).
-  - Perform strict integer arithmetic in backend services using native `BigInt`.
-
-### 2.3 Record Tampering & Non-Immutability
-* **Threat:** A compromised admin or internal attacker alters historical transaction rows to conceal theft or adjust balances.
-* **Mitigation:**
-  - Ledger entries must be **append-only**.
-  - No `UPDATE` or `DELETE` permissions should be granted to application users on transaction tables.
-  - Adjustments and reversals must be handled strictly by creating compensatory offsetting entries (e.g., reversal transactions).
-  - Include cryptographic hash chaining or tamper-evident audit logs for ledger verification.
+Each threat is documented using a standardized five-part format:
+1. **Threat & Potential Impact**
+2. **Relevant Attack Scenario**
+3. **Implemented Mitigation**
+4. **Supporting Implementation or Test Evidence**
+5. **Remaining Limitations & Residual Risk**
 
 ---
 
-## 3. STRIDE Threat Analysis
+## 1. Executive Summary & Core Invariants
 
-| Threat Category | Description | Specific Risk in LedgerLine | Mitigation Strategy |
+In a financial double-entry banking system, integrity, auditability, and immutability are paramount. A single undetected data tampering incident or calculation flaw causes monetary loss, regulatory failure, and broken trust.
+
+LedgerLine operates under strict mathematical and database-enforced invariants:
+- **Integer Paise Arithmetic:** All money is tracked in integer paise ($1\text{ INR} = 100\text{ paise}$). Floating-point arithmetic is prohibited.
+- **Double-Entry Balancing (`LL001`–`LL004`):** Every financial mutation produces exactly two balanced ledger entries (one debit, one credit) matching the transfer amount.
+- **Append-Only Immutability (`LL007`):** Ledger entries, completed transfers, and refusal audit logs are append-only. `ledgerline_app` cannot update or delete ledger entries through its granted application privileges, and database triggers reject normal UPDATE and DELETE operations. The privileged schema owner remains a trust boundary capable of altering schema or triggers (immutability protects against application-level operations, but is not an absolute impossibility of bypass by privileged database roles).
+- **Concurrency Serialization:** Transfers lock accounts in canonical ascending UUID order (`ORDER BY id ASC FOR UPDATE`) to serialize access and reduce deadlock risk.
+- **Duplicate Request Protection:** Mutating endpoints enforce scoped, hashed idempotency keys preventing duplicate execution for the same applicable key and scope.
+- **Least-Privilege Separation:** The runtime application (`ledgerline_app`) cannot alter tables, disable triggers, or truncate data.
+
+---
+
+## 2. Baseline Vulnerability Benchmark & Concurrency Verification
+
+### 2.1 Historical Baseline Flaw: TOCTOU Race Condition (Experiment 2B — 2026-11-07)
+* **Threat & Impact:** Time-of-check to time-of-use (TOCTOU) race condition in concurrent transfer requests allows an account to be overdrawn into a negative balance without authorization.
+* **Attack Scenario:**
+  - A user with a balance of ₹1,000.00 (100,000 paise) simultaneously dispatches two concurrent transfer requests of ₹800.00 (80,000 paise) each to separate destinations.
+  - In the unhardened baseline (`52592cb`), both requests read the source balance before either executed an `UPDATE`.
+* **Empirical Reproduction Results ([`backend/tests/deterministic-concurrency.test.js`](file:///d:/LedgerLine/backend/tests/deterministic-concurrency.test.js)):**
+  Using a two-party synchronization barrier holding Client #1's read open until Client #2 executed its read:
+  ```text
+  === DETERMINISTIC CONCURRENCY TEST RESULTS ===
+  Barrier Timed Out      : NO — Both reads synchronized
+  Reads Reached Barrier  : 2 of 2
+  Distinct Client IDs    : 1, 2
+  Observed Source Reads  : [{"clientId":1,"balance":"100000"},{"clientId":2,"balance":"100000"}]
+  Request 1 HTTP Status  : 201 Created
+  Request 2 HTTP Status  : 201 Created
+  Initial Source Balance : 100000 paise (₹1,000.00)
+  Final Source Balance   : -60000 paise (-₹600.00) ← OVERDRAWN
+  Final Dest 1 Balance   : 80000 paise
+  Final Dest 2 Balance   : 80000 paise
+  Completed Transfers    : 2
+  Is Source Overdrawn    : YES — OVERDRAFT CONFIRMED
+  ```
+* **Historical Root Cause:**
+  1. The balance read query executed a plain non-locking `SELECT`.
+  2. The balance deduction executed an unconditional `UPDATE accounts SET balance_paise = balance_paise - $1`. Both transactions committed successfully because both passed the in-process check ($100{,}000 \ge 80{,}000$).
+
+### 2.2 Phase 3 Hardening & Concurrency Mitigation (2026-11-08)
+* **Implemented Mitigation:**
+  1. **Row-Level Pessimistic Locking:** Both participating accounts are locked in deterministic ascending UUID order:
+     ```sql
+     SELECT id, balance_paise FROM accounts WHERE id IN ($1, $2) ORDER BY id ASC FOR UPDATE
+     ```
+  2. **Defense-in-Depth Conditional Deduction:** The deduction query asserts available funds in SQL:
+     ```sql
+     UPDATE accounts
+     SET balance_paise = balance_paise - $1, updated_at = NOW()
+     WHERE id = $2 AND balance_paise >= $1
+     RETURNING balance_paise
+     ```
+     If `rowCount !== 1`, the transaction immediately aborts with `ROLLBACK` and returns HTTP 422 `InsufficientFundsError`.
+* **Empirical Verification Results ([`backend/tests/deterministic-concurrency.test.js`](file:///d:/LedgerLine/backend/tests/deterministic-concurrency.test.js)):**
+  ```text
+  === CONCURRENCY REGRESSION TEST RESULTS ===
+  Barrier Timed Out      : NO — Both requests synchronized
+  Second Client Dispatched: YES — Contended for row lock in PostgreSQL
+  Distinct Client IDs    : 1, 2
+  Observed Source Reads  : [{"clientId":1,"order":1,"balance":"100000"},{"clientId":2,"order":2,"balance":"20000"}]
+  Request 1 HTTP Status  : 201 Created
+  Request 2 HTTP Status  : 422 Unprocessable Entity
+  Initial Source Balance : 100000 paise (₹1,000.00)
+  Final Source Balance   : 20000 paise (₹200.00) ← PROTECTED
+  Final Dest 1 Balance   : 80000 paise
+  Final Dest 2 Balance   : 0 paise
+  Total Money in System  : 100000 paise (conserved)
+  Completed Transfers    : 1
+  Is Source Overdrawn    : NO — PROTECTED
+  ```
+* **Residual Risk & Concurrency Disclaimer:**
+  Deterministic row-lock ordering (`ORDER BY id ASC`) prevents circular lock wait between transactions accessing the same pair of accounts, significantly reducing deadlock probability. However, it cannot guarantee the prevention of all possible deadlocks across multi-table operations or under high database contention. The tested scenario passed.
+
+---
+
+## 3. Historical Risk Evolution Matrix (Experiment 1 &rarr; Full Implementation)
+
+The table below contrasts the vulnerabilities identified during the initial baseline (Experiment 1) against the subsequent mitigations implemented across Phases 3–6, and details the remaining residual risk:
+
+| Identified Risk Area | Baseline Flaw (Experiment 1) | Implemented Mitigation (Phases 3–6) | Remaining Residual Risk |
 | :--- | :--- | :--- | :--- |
-| **Spoofing** | Pretending to be someone else | Unauthorized user forging JWT tokens or replaying credentials | Use strong JWT secrets (`HS256`/`RS256`), short token expiration (e.g., 15-60 min), refresh token rotation, and bcrypt password hashing (work factor >= 12). |
-| **Tampering** | Altering data in transit or at rest | Modifying transfer amounts, account IDs, or SQL injection | Parameterized queries with `node-postgres` ($1, $2), strict input validation via `Zod` schemas before data reaches business logic, HTTPS enforcement. |
-| **Repudiation** | Denying an action took place | A user claims they never initiated a high-value transfer | Comprehensive append-only audit log capturing `user_id`, `ip_address`, `timestamp`, `action`, and cryptographic request hash. |
-| **Information Disclosure** | Exposing private financial data | Leaking account balances, customer PII, or database credentials | Environment variable isolation (`.env` omitted from git), strict CORS policies, stripped error stack traces in production, role-based data projection. |
-| **Denial of Service (DoS)** | Overwhelming services to block legitimate transactions | Connection pool exhaustion or API flooding | Rate limiting on public and auth endpoints (`express-rate-limit`), connection pool bounds (`pg.Pool` max 20), request body payload limits. |
-| **Elevation of Privilege** | Gaining unauthorized access to capabilities | A regular user approving their own transaction or viewing another user's ledger | Role-Based Access Control (RBAC) middleware verifying user permissions and ownership checks on every protected route. |
+| **Concurrent Overdraft / Double-Spending** | Unlocked reads (`SELECT`) and unconditional updates allowed simultaneous debits to overdraw accounts (-60,000 paise). | `SELECT ... FOR UPDATE` with deterministic `ORDER BY id ASC` and conditional deduction `WHERE balance_paise >= $1`. Verified by regression tests. | Lock contention under high throughput; deadlocks possible if foreign queries lock tables in reverse order. |
+| **Missing Idempotency Protection** | Missing `Idempotency-Key` header allowed network retries to double-execute transfers. | Mandatory `Idempotency-Key` with SHA-256 payload hashing and response caching (`idempotency_keys` table). Bounded claim-and-retry loop. | Unbounded table growth without archival; clients reusing keys with different payloads receive 409 Conflict. |
+| **Mutable Balances (No Double-Entry)** | Balances were updated directly on `accounts` without an immutable transaction audit log. | Immutable append-only `ledger_entries` table with deferred balancing constraint `trg_verify_transfer_balance` (`LL001`–`LL004`). | Direct SQL updates to `accounts` executed out-of-band as `ledgerline_app` bypass ledger triggers (periodic reconciliation queries are a recommended operational control and are not currently implemented as an automated scheduled service). |
+| **Silent Refusal / No Audit Trail** | Failed transactions executed `ROLLBACK` and vanished without a trace. | Append-only `audit_refused_attempts` table logging business refusals with rollback-release-audit ordering and 404 FK protection. | Anonymous 401s are unlogged to prevent DoS storage flooding; audit insertion failures trigger 500 (`durableAudit: false`). |
+| **Missing Authorization & Ownership** | Any caller knowing an account UUID could transfer funds out of any account. | Strict RBAC (`authenticateJWT`, `requireRole`, `requireAccountOwnership`) and SQL isolation (`user_id = req.user.id`). | Express middleware is the sole authorization boundary; database functions do not verify HTTP JWTs. |
 
 ---
 
-## 4. Secret Management & Secure Development Lifecycle
-- **No Hardcoded Secrets:** Passwords, database connection strings, and JWT signing keys must be loaded exclusively from environment variables.
-- **Git Protection:** `.gitignore` excludes all `.env*` files except `.env.example`.
-- **Security Audits:** Regular `npm audit` scans and dependency updates.
-- **Strict Error Handling:** Error responses to clients must not reveal internal database structure, table names, or raw SQL queries.
+## 4. In-Depth Threat Analysis & Mitigations
+
+### 4.1 Duplicate Requests & Idempotency Key Handling
+1. **Threat & Potential Impact:** Transient network timeouts, client retry loops, or multiple clicks cause the same financial mutation to be executed multiple times, resulting in accidental double debits or duplicate credits.
+2. **Relevant Attack Scenario:** A user's mobile connection drops immediately after the database commits a transfer. The banking client automatically retries the identical HTTP request, deducting another 50,000 paise from the sender.
+3. **Implemented Mitigation:**
+   - Mutating endpoints require an `Idempotency-Key` HTTP header.
+   - Idempotency operates strictly as **protection against duplicate execution for the same applicable key and client scope** (`client_scope`), not as a universal network-layer replay prevention mechanism.
+   - Keys are explicitly partitioned:
+     - Transfers: `account:<sourceAccountId>`
+     - Deposits: `deposit:<accountId>`
+     - Withdrawals: `withdraw:<accountId>`
+     - Reversals: `reversal:<originalTransferId>`
+   - The backend stores a SHA-256 hash of canonical business parameters.
+   - Replaying the identical key with matching parameters returns the cached result with HTTP header `Idempotent-Replayed: true`.
+   - Re-sending the same key with altered parameters returns HTTP `409 Conflict` (`IdempotencyConflictError`).
+   - If an in-flight request fails business solvency checks (HTTP 422), the transaction rolls back, releasing the key reservation so the client can fund the account and retry.
+4. **Supporting Implementation or Test Evidence:**
+   - [`backend/tests/ledger.test.js`](file:///d:/LedgerLine/backend/tests/ledger.test.js) &mdash; Tests 8, 9, 10, 15.
+   - [`frontend/src/test/transfers.test.jsx`](file:///d:/LedgerLine/frontend/src/test/transfers.test.jsx) &mdash; Tests 4, 8, 9.
+5. **Remaining Limitations & Residual Risk:**
+   Idempotency records persist indefinitely unless archived. Idempotency does not protect against an attacker issuing fresh requests with newly generated UUID keys; application-level rate limiting and session authentication are required.
 
 ---
 
-## 5. Experiment 1: Risk Assessment & Status of Baseline Protections
-
-The current implementation of `POST /api/transfers` provides an initial working functional baseline. Below is a status breakdown distinguishing verified protections from known unverified vulnerabilities.
-
-### 5.1 Verified Protections (Tested & Confirmed)
-1. **Integer Arithmetic Protection:** Money is stored as `BIGINT` in PostgreSQL and manipulated using JavaScript `BigInt`, eliminating floating-point rounding errors.
-2. **SQL Injection Defense:** All queries in `transfers.js` strictly use parameterized queries (`$1, $2`).
-3. **Payload Sanitization:** Zod schema rejects malformed UUIDs, non-integer amounts, negative amounts, zero amounts, and transfers where `sourceAccountId === destinationAccountId`.
-4. **Basic Transaction Rollback:** Balance deduction and credit run within a database transaction (`BEGIN ... COMMIT / ROLLBACK`), ensuring that if either update fails, neither takes effect.
-
-### 5.2 Identified Security Risks & Unverified Behaviors (Under Investigation)
-
-| Risk Area | Current Status | Technical Root Cause (Code Review) | Potential Financial Consequence |
-| :--- | :--- | :--- | :--- |
-| **Concurrent Overdraft / Double-Spending** | **✅ MITIGATED & VERIFIED (2026-11-08)** (Historically confirmed in Experiment 2B with -60,000 paise overdraft; mitigated via `SELECT ... FOR UPDATE` with deterministic lock ordering `ORDER BY id` and conditional deduction guard `AND balance_paise >= $1`. Verified by deterministic regression test: HTTP [201, 422], final source balance 20,000 paise, zero overdraft). | **Historical root cause (fixed):** Read query previously used non-locking `SELECT` and unconditional `UPDATE`. **Mitigation applied:** Both accounts are locked in canonical order (`WHERE id IN ($1, $2) ORDER BY id FOR UPDATE`), serializing concurrent transactions at the database engine level. The deduction uses conditional `WHERE id = $2 AND balance_paise >= $1` with `rowCount` check. | **Historical Risk:** Source account was depleted to -₹600.00 (-60,000 paise). **Current Status:** Overdraft is physically prevented; the second concurrent transfer is blocked by PostgreSQL until the first commits, reads the updated balance (20,000 paise), fails the balance check, and is rejected with HTTP 422. |
-| **Missing Idempotency Protection** | **Unconfirmed Risk Under Investigation** (Design gap: no idempotency key support) | `POST /api/transfers` does not accept or track an `Idempotency-Key` header. | If an HTTP response drops due to network timeout and the client retries, the transfer executes twice, deducting double the funds. |
-| **Mutable Balances (No Double-Entry Ledger)** | **Architectural Risk (Design Gap)** | Balances are directly updated on the `accounts` table via `UPDATE accounts SET balance_paise = ...` rather than derived from an append-only ledger of debit and credit entries. | A failure or database discrepancy cannot be mathematically audited or reconstructed from historical entries. |
-| **Silent Refusal / No Audit Trail** | **Identified Feature Gap** | Insufficient funds errors return HTTP 422 and execute `ROLLBACK`. No record of the refused attempt is written. | Fraudulent transfer attempts or unauthorized brute-force attempts leave no trace for compliance or security monitoring. |
-| **Missing Authorization & Ownership** | **Identified Security Gap (Known)** | The endpoint accepts any `sourceAccountId` without verifying that the requesting user owns or has authority over that account. | Any authenticated or unauthenticated client can drain any account if they know its UUID. |
+### 4.2 Reversal Abuse & Recipient Solvency
+1. **Threat & Potential Impact:** An account holder or malicious party attempts to claw back funds without authorization, reverses the same transfer multiple times, or drives a recipient account into an unauthorized negative balance by reversing funds that have already been withdrawn.
+2. **Relevant Attack Scenario:** Alice sends ₹500 to Bob. Later, Alice attempts to unilaterally reverse the transfer to take the funds back without Bob's consent. Alternatively, Eve reverses a transfer, receives the credit, and immediately issues a second reversal request for the same original transfer.
+3. **Implemented Mitigation:**
+   - **Debited Account Ownership Verification:** In `POST /api/transfers/:id/reversal`, reversing a transfer debits the *original recipient* and credits the *original sender*. The backend enforces that only the party being debited (`req.user.id === debitedAccount.user_id`) or an administrator can initiate the reversal. The original sender cannot unilaterally claw back funds (`403 Forbidden`).
+   - **Recipient Solvency Check:** The debited recipient account is locked (`FOR UPDATE`) and checked for sufficient balance. If `balance_paise < amount_paise`, the reversal is rejected with HTTP `422 Unprocessable Entity` ("Destination account has insufficient funds to reverse this transfer").
+   - **Database-Enforced Single Reversal:** A PostgreSQL partial unique index `idx_transfers_unique_reversal ON transfers (original_transfer_id) WHERE original_transfer_id IS NOT NULL AND transfer_type = 'reversal'` physically guarantees that an original transfer cannot be reversed more than once at the database engine level.
+   - **Compensating Immutability:** Completed transfer records are never modified or deleted. An explicit compensating transfer record (`transfer_type = 'reversal'`) and dual compensating ledger entries are created.
+4. **Supporting Implementation or Test Evidence:**
+   - [`backend/tests/ledger.test.js`](file:///d:/LedgerLine/backend/tests/ledger.test.js) &mdash; Test 11 (compensating entries), Test 12 (duplicate reversal blocked), Test 14 (insufficient recipient funds rejected).
+   - [`backend/tests/rbac.test.js`](file:///d:/LedgerLine/backend/tests/rbac.test.js) &mdash; Reversal ownership authorization tests.
+5. **Remaining Limitations & Residual Risk:**
+   If a recipient deliberately drains their account balance to zero after receiving funds, automated reversal fails and requires offline administrative dispute resolution.
 
 ---
 
-## 6. Experiment 2: Concurrency Empirical Findings (2026-11-07)
-
-### 6.1 Exploratory Run (concurrency.test.js)
-* **Test Executed:** Single exploratory execution of `backend/tests/concurrency.test.js` launching two simultaneous requests of 80,000 paise against an account with 100,000 paise.
-* **Empirical Observations:**
-  - Request 1 returned HTTP `201 Created`.
-  - Request 2 returned HTTP `422 Unprocessable Entity`.
-  - Final Source Balance: `20000` paise (not negative).
-  - Completed transfers recorded: `1`.
-* **Evidence Interpretation:**
-  - **Empirical Status:** The race condition was **not reproduced** in this single exploratory run. The operations happened to serialize sequentially on local loopback.
-  - **Code Review Finding:** Code inspection confirms that `SELECT` lacks `FOR UPDATE` and `UPDATE` lacks a conditional balance check. Thus, while unproven by this single test, the structural mechanism that could allow double-spending under concurrent interleaving remains present in the code.
-  - **Test Assertion Flaw Identified:** The exploratory assertion `expect([201, 422]).toContain(...)` was identified as insufficiently strict, as it would not fail even if both requests returned 201.
-
-### 6.2 Deterministic Barrier Reproduction (deterministic-concurrency.test.js) — 2026-11-07
-
-* **Test Executed:** `npx.cmd jest tests/deterministic-concurrency.test.js --runInBand --forceExit`
-* **Test Mechanism:** A pre-started TCP server received both HTTP requests simultaneously via `Promise.all`. The `pool.connect` method was instrumented to intercept each client's source-account balance SELECT. A two-party barrier held Request 1 at its SELECT until Request 2 also completed its SELECT — guaranteeing both reads observed the same pre-commit balance before either UPDATE executed.
-* **Empirical Observations:**
-  - Barrier Timed Out: **NO — Both reads synchronized**
-  - Reads Reached Barrier: **2 of 2**
-  - Distinct PostgreSQL Client IDs: **1, 2** (two separate transactions confirmed)
-  - Observed Source Reads: `[{clientId:1, balance:"100000"}, {clientId:2, balance:"100000"}]`
-  - Request 1 HTTP Status: **201 Created**
-  - Request 2 HTTP Status: **201 Created**
-  - Final Source Balance: **-60000 paise** ← OVERDRAWN
-  - Final Dest 1 Balance: `80000 paise`
-  - Final Dest 2 Balance: `80000 paise`
-  - Total Money in System: `100000 paise` (conservation holds — funds were not created, the account went negative)
-  - Completed Transfers: **2**
-  - Is Source Overdrawn: **YES — OVERDRAFT CONFIRMED**
-  - Jest result: **PASS** (1 test passed, 431 ms)
-
-* **Exact Transaction Sequence Confirmed:**
-  ```
-  Tx 1 (client #1):  BEGIN
-  Tx 1 (client #1):  SELECT balance_paise = 100000  ← read under barrier
-  Tx 1 (client #1):  [HELD at barrier — waiting for Tx 2]
-  Tx 2 (client #2):  BEGIN
-  Tx 2 (client #2):  SELECT balance_paise = 100000  ← same stale value read
-  Tx 2 (client #2):  [RELEASES barrier]
-  Tx 2 (client #2):  UPDATE balance_paise = 100000 - 80000 = 20000; COMMIT → HTTP 201
-  Tx 1 (client #1):  UPDATE balance_paise = 20000  - 80000 = -60000; COMMIT → HTTP 201
-  ```
-
-* **Vulnerability Status: EMPIRICALLY CONFIRMED**
-  - Both HTTP responses were `201 Created`.
-  - PostgreSQL on disk shows `balance_paise = -60000` for the source account.
-  - The in-process balance check (`if (sourceBalance < transferAmount)`) passed for both requests because both read `100000` before either committed.
-  - The absence of `SELECT ... FOR UPDATE` allowed both transactions to read the same row concurrently without blocking.
-  - The absence of a conditional `WHERE balance_paise >= $1` on the UPDATE allowed both deductions to commit regardless of intermediate state.
-
-* **Fix Implemented & Empirically Verified (2026-11-08):**
-  - Added `SELECT ... FOR UPDATE` with canonical lock ordering (`ORDER BY id`) on both accounts.
-  - Added conditional deduction guard `AND balance_paise >= $1` with strict `rowCount` check.
-  - Verified by deterministic regression test (Section 6.3).
-
-### 6.3 Phase 3 Hardening & Concurrency Mitigation (2026-11-08)
-
-* **Test Executed:** `npx.cmd jest backend/tests/deterministic-concurrency.test.js --runInBand --verbose`
-* **Test Synchronization Strategy:**
-  - Client #1 acquires the row lock via `SELECT ... FOR UPDATE` on `sourceAccountId`.
-  - Client #1 pauses inside its transaction, holding the lock open.
-  - Client #2 dispatches its concurrent `SELECT ... FOR UPDATE`, contending for the same locked row.
-  - PostgreSQL automatically blocks Client #2 at the database engine level until Client #1 commits.
-  - Client #1 executes deduction (80,000 paise), credits destination 1, and commits.
-  - Upon Client #1's commit, PostgreSQL unblocks Client #2, which re-evaluates the updated committed row, reads the new balance (`20,000` paise), finds `20,000 < 80,000`, rolls back, and returns HTTP 422 `InsufficientFundsError`.
-* **Empirical Observations:**
-  - Barrier Timed Out: **NO — Both requests synchronized**
-  - Second Client Dispatched: **YES — Contended for row lock in PostgreSQL**
-  - Distinct PostgreSQL Client IDs: **1, 2** (two separate connections verified)
-  - Observed Source Reads: `[{"clientId":1,"order":1,"balance":"100000"},{"clientId":2,"order":2,"balance":"20000"}]`
-  - Request 1 HTTP Status: **201 Created**
-  - Request 2 HTTP Status: **422 Unprocessable Entity**
-  - Final Source Balance: **20000 paise** (₹200.00 — strictly positive, zero overdraft)
-  - Final Dest 1 Balance: **80000 paise** (received funds)
-  - Final Dest 2 Balance: **0 paise** (rejected, untouched)
-  - Total Money in System: **100000 paise** (exact conservation preserved)
-  - Completed Transfers: **1**
-  - Is Source Overdrawn: **NO — PROTECTED**
-  - Jest result: **PASS** (1 test passed, 520 ms)
-
-* **Exact Transaction Sequence Confirmed Under Fix:**
-  ```
-  Tx 1 (client #1):  BEGIN
-  Tx 1 (client #1):  SELECT ... WHERE id IN ($1, $2) ORDER BY id FOR UPDATE  ← acquires row lock, reads 100000
-  Tx 1 (client #1):  [HELD at barrier holding lock — waiting for Tx 2 to dispatch]
-  Tx 2 (client #2):  BEGIN
-  Tx 2 (client #2):  SELECT ... WHERE id IN ($1, $2) ORDER BY id FOR UPDATE  ← BLOCKED by PostgreSQL engine!
-  Tx 1 (client #1):  [UNPAUSED upon Tx 2 dispatch]
-  Tx 1 (client #1):  UPDATE accounts SET balance_paise = balance_paise - 80000 WHERE id = :sourceId AND balance_paise >= 80000
-  Tx 1 (client #1):  UPDATE accounts SET balance_paise = balance_paise + 80000 WHERE id = :dest1Id
-  Tx 1 (client #1):  INSERT INTO transfers ...
-  Tx 1 (client #1):  COMMIT → HTTP 201 Created
-  -------------------------------------------------------------------------------------------------------
-  Tx 2 (client #2):  [UNBLOCKED by PostgreSQL engine upon Tx 1 COMMIT]
-  Tx 2 (client #2):  SELECT re-evaluates committed row → reads balance_paise = 20000
-  Tx 2 (client #2):  Check: 20000 < 80000 → Insufficient funds
-  Tx 2 (client #2):  ROLLBACK → HTTP 422 Unprocessable Entity
-  ```
-
-* **Mitigation Status: VERIFIED AND MITIGATED**
-  - Overdraft is physically prevented by database row-level locking.
-  - The second concurrent transfer cannot read stale balance data.
-  - Deadlock risk is reduced by deterministic UUID sorting (`ORDER BY id`) for transactions locking the same accounts in a consistent order.
-  - Total money in the system is conserved without leakage or double-spending.
+### 4.3 Opening-Balance Cutover Integrity & Zero-Sum Accounting
+1. **Threat & Potential Impact:** Introducing baseline customer balances during migration creates unbacked phantom currency, distorts balance accounting, or violates the fundamental double-entry conservation invariant $\sum \text{balances} = 0$.
+2. **Relevant Attack Scenario:** An initial database migration sets customer balances to positive amounts without offsetting counter-entries, causing the total system money supply to be unbacked and mathematically unverifiable.
+3. **Implemented Mitigation:**
+   - **System Equity Account:** Migration `002` provisions a dedicated System Equity Account (`00000000-0000-0000-0000-000000000001`, `SYSTEM_EQUITY_OPENING_BALANCE`).
+   - **Exact Negative Sum Offset:** The system equity balance is set to the exact negative sum of all customer opening balances:
+     $$\text{Balance}_{\text{equity}} = -\sum_{i} \text{Balance}_{\text{customer}_i}$$
+   - **Balanced Cutover Entries:** Opening transfers and balanced ledger entries are created for every pre-existing account. Positive customer balances debit System Equity and credit Customer; negative balances debit Customer and credit System Equity.
+   - **Conservation Assertion:** The migration asserts $\sum \text{balance\_paise} = 0$ across all accounts in the database upon cutover completion.
+4. **Supporting Implementation or Test Evidence:**
+   - [`backend/tests/ledger.test.js`](file:///d:/LedgerLine/backend/tests/ledger.test.js) &mdash; Test 13.
+   - [`database/migrations/002_create_ledger_entries_and_idempotency.sql`](file:///d:/LedgerLine/database/migrations/002_create_ledger_entries_and_idempotency.sql).
+5. **Remaining Limitations & Residual Risk:**
+   System equity is an internal accounting mechanism representing the baseline capital obligation of the platform to customer deposits; it does not represent physical cash or central bank reserves.
 
 ---
 
-## 7. Phase 4: Double-Entry Ledger, Idempotency & Financial Invariants
-
-### 7.1 Double-Entry Balance Balancing & Transaction Incompleteness
-* **Threat:** A partial system failure, software bug, or network timeout leaves a transfer half-committed (e.g. sender debited but recipient not credited), or a developer creates unbalanced ledger entries.
-* **Mitigation:**
-  - Every financial transaction produces dual ledger entries: exactly one debit and exactly one credit.
-  - Database constraint triggers (`trg_verify_transfer_balance` and `trg_verify_ledger_entry_balance`) are declared `CONSTRAINT ... DEFERRABLE INITIALLY DEFERRED`.
-  - At transaction commit time, PostgreSQL evaluates the deferred constraint trigger and asserts:
-    1. Exactly one credit and one debit entry exist for the transfer (`LL001`).
-    2. The debit amount equals the credit amount and matches the transfer `amount_paise` (`LL002`).
-    3. The entries reference the exact accounts matching the transfer's source and destination (`LL003`, `LL004`).
-  - Constraint validation logic uses PostgreSQL-compatible text-cast aggregation `(MAX(account_id::text) FILTER (...))::uuid` to reliably identify account UUIDs without relying on unsupported aggregate operators (preventing PostgreSQL SQLSTATE 42883).
-  - If any condition is violated, PostgreSQL aborts the entire transaction with an error.
-
-### 7.2 Ledger Immutability & Anti-Tampering
-* **Threat:** Malicious administrative access, rogue SQL queries, or backend bugs modify or delete historical ledger records or completed transfers.
-* **Mitigation:**
-  - Immutability trigger functions (`prevent_ledger_mutation` and `prevent_transfer_mutation`) unconditionally intercept all `UPDATE` and `DELETE` statements on `ledger_entries` and `transfers`.
-  - There are **no session-level backdoors or bypass settings**. Immutability is absolute in both application code and database triggers (SQL state `LL007`: "ledger_entries is append-only").
-  - The runtime application role `ledgerline_app` is granted only `SELECT, INSERT` on `ledger_entries` and `transfers`. It does not own the tables and has no `TRUNCATE`, `UPDATE`, or `DELETE` privileges or ability to disable triggers. Attempted `UPDATE` or `DELETE` by `ledgerline_app` is rejected at the PostgreSQL engine level with SQLSTATE `42501` (permission denied).
-  - **Defense-in-Depth Immutability:** Even if executed by a privileged role or table owner (`ledgerline_owner`), the `prevent_ledger_mutation` and `prevent_transfer_mutation` triggers intercept the operation and unconditionally abort with SQLSTATE `LL007` ("append-only ledger entries cannot be updated or deleted").
-  - Foreign keys between `ledger_entries` and `accounts`/`transfers` use `ON DELETE RESTRICT`.
-
-### 7.3 Duplicate Network Requests & Replay Attacks
-* **Threat:** Transient network timeouts cause clients to retry transfer requests, leading to accidental double transfers; or an attacker captures and replays transfer requests with altered parameters.
-* **Mitigation:**
-  - Mandatory `Idempotency-Key` header on all mutating transfer and reversal requests.
-  - Scoped idempotency (`client_scope`): transfers are scoped to `account:<sourceAccountId>` and reversals to `reversal:<originalTransferId>`, preventing key collision across distinct accounts while forward-compatible with user authentication (`user:<userId>`).
-  - Request hashing: A SHA-256 hash of canonical business parameters (`sourceAccountId`, `destinationAccountId`, `amountPaise`) is computed and stored.
-  - Transaction-safe concurrency: The backend executes a bounded claim-and-retry loop (up to 3 attempts) using `INSERT INTO idempotency_keys ... ON CONFLICT (client_scope, key) DO NOTHING RETURNING key`.
-  - If a second identical request arrives while the first is in-flight, it executes `SELECT ... FOR UPDATE` on the idempotency key row. It blocks at the PostgreSQL engine level until the first transaction completes.
-  - If the committed response exists:
-    - If the request hash matches, it replays the committed response with header `Idempotent-Replayed: true`.
-    - If the request hash differs, it rejects the request with HTTP `409 Conflict`.
-  - If the first transaction rolls back due to a crash, transient failure, or business refusal:
-    - The uncommitted idempotency reservation is rolled back by PostgreSQL.
-    - Waiting requests detect that no row exists, cleanly abort their current transaction block, and loop to claim the key in a fresh transaction without race conditions or aborted-transaction crashes.
-  - **Business Refusal Retriability Policy:** If a transfer fails a business validation or solvency check (such as `InsufficientFundsError` 422 or `NotFoundError` 404), the transaction rolls back, releasing the idempotency reservation. This allows the client to add funds or correct parameters and retry the transfer with the same idempotency key later.
-
-### 7.4 Transfer Reversals & Double-Reversal Abuse
-* **Threat:** A user or administrator reverses the same transfer multiple times, or reverses a transfer after the recipient has already spent the received funds, driving the recipient into an unauthorized overdraft.
-* **Mitigation:**
-  - Compensating transactions: Reversals **never modify or update the original completed transfer** (preserving complete financial audit history). Instead, a new transfer record is created with `transfer_type = 'reversal'`, linking to `original_transfer_id`, and generating two compensating ledger entries (debit recipient, credit original sender).
-  - Determining reversal status: Applications and auditors determine whether an original transfer has been reversed by querying:
-    ```sql
-    SELECT * FROM transfers
-    WHERE original_transfer_id = :originalTransferId
-      AND transfer_type = 'reversal';
-    ```
-  - Database-enforced uniqueness: A PostgreSQL partial unique index `idx_transfers_unique_reversal ON transfers (original_transfer_id) WHERE original_transfer_id IS NOT NULL AND transfer_type = 'reversal'` physically guarantees that an original transfer cannot be reversed more than once at the database engine level.
-  - Recipient solvency check: Before executing a reversal, the recipient account is locked with `FOR UPDATE` and its balance is verified against the reversal amount. If `balance_paise < amount_paise`, the reversal is rejected with HTTP `422 Unprocessable Entity` ("Destination account has insufficient funds to reverse this transfer").
-
-### 7.5 Legacy Opening Balance Accounting & Zero-Sum Invariants
-* **Threat:** Initial balance migration introduces phantom currency or distorts existing customer account balances.
-* **Mitigation:**
-  - Dedicated System Equity Account (`00000000-0000-0000-0000-000000000001`, `SYSTEM_EQUITY_OPENING_BALANCE`).
-  - Migration script preserves existing customer balances without modification.
-  - The final system equity balance is calculated as the negative sum of all customer opening balances:
-    $$\text{Balance}_{\text{equity}} = -\sum_{i} \text{Balance}_{\text{customer}_i}$$
-  - For positive customer balances: Debit System Equity, Credit Customer.
-  - For negative customer balances: Debit Customer, Credit System Equity.
-  - Zero-sum conservation: The database invariant $\sum_{\text{all accounts}} \text{balance\_paise} = 0$ is asserted and verified upon completion of the cutover.
-
-### 7.6 Database Role Separation & Least Privilege
-* **Threat:** The application service or an attacker exploiting an application vulnerability alters database schemas, disables triggers, or truncates tables.
-* **Mitigation:**
-  - Two-role architecture (`database/provision_roles.sql`):
-    - `ledgerline_owner`: Migration and schema owner. Executes migrations (`npm run migrate:backend`). Owns all tables, sequences, and triggers. Not used for customer HTTP traffic.
-    - `ledgerline_app`: Restricted runtime application login role used by the Node.js Express server.
-  - Role permissions enforcement:
-    - `ledgerline_app` has `GRANT SELECT, INSERT, UPDATE` on `accounts` (cannot alter table or truncate).
-    - `ledgerline_app` has `GRANT SELECT, INSERT` on `transfers` and `ledger_entries` (no UPDATE, DELETE, or TRUNCATE).
-    - `ledgerline_app` has `REVOKE ALL` on `schema_migrations`.
-    - Only `ledgerline_owner` can execute DDL or modify triggers.
-
-### 7.7 Financial Mutation Trust Boundary & Balance-to-Ledger Coupling
-* **Threat:** An administrative script, developer session, or unmitigated SQL injection vulnerability executing directly as `ledgerline_app` performs a direct SQL `UPDATE accounts SET balance_paise = ...`, modifying account balances without creating corresponding double-entry ledger entries.
-* **Architecture & Boundary Analysis:**
-  - `ledgerline_app` requires column-level `UPDATE (balance_paise, updated_at, opening_balance_captured_at)` on `public.accounts` to execute legitimate transfers, reversals, and opening-balance cutovers coordinated by the Express application.
-  - The database-level deferred constraint trigger `trg_verify_transfer_balance` is declared on `public.transfers`. It validates that transfer records are balanced by corresponding `ledger_entries`; it does not guarantee that every account balance mutation is ledger-backed.
-  - **Limitation (Known Residual Risk):** There is no database trigger on `public.accounts` that intercepts direct SQL balance updates or prevents an `UPDATE accounts SET balance_paise = ...` from executing without ledger entries if invoked directly as `ledgerline_app`.
-  - **Trust Boundary:** The Express application is the authoritative security boundary responsible for coupling account balance updates with immutable double-entry ledger entries inside an atomic database transaction.
-  - **Compensating Control:** Discrepancies between stored account balances (`accounts.balance_paise`) and balances reconstructed from historical ledger entries (`ledger_entries`)—accounting for opening-balance entries and compensating reversals—can be detected by periodic audit reconciliation queries.
+### 4.4 Database Role Separation & Least-Privilege Controls
+1. **Threat & Potential Impact:** A compromised application server, malicious developer, or SQL injection vulnerability alters database schemas, disables triggers, or truncates financial tables.
+2. **Relevant Attack Scenario:** An attacker exploits an application vulnerability to execute arbitrary SQL as the database user, attempting to run `TRUNCATE TABLE accounts;` or `DROP TRIGGER trg_verify_transfer_balance ON transfers;`.
+3. **Implemented Mitigation:**
+   - **Two-Role Architecture ([`database/provision_roles.sql`](file:///d:/LedgerLine/database/provision_roles.sql)):**
+     - `ledgerline_owner`: Migration and schema owner. Executes migrations (`npm run migrate:backend`). Owns all tables, sequences, and triggers. Not used for customer HTTP traffic.
+     - `ledgerline_app`: Restricted runtime application login role used by the Node.js Express server.
+   - **Role Privileges Enforcement:**
+     - `ledgerline_app` is granted strictly `SELECT, INSERT` on `transfers`, `ledger_entries`, and `audit_refused_attempts` (no `UPDATE`, `DELETE`, or `TRUNCATE`).
+     - `ledgerline_app` has column-level `INSERT (account_number)` and column-level `UPDATE (balance_paise, updated_at, opening_balance_captured_at, next_entry_sequence)` on `accounts`. It cannot alter table schemas or disable triggers.
+     - `ledgerline_app` has `REVOKE ALL` on `schema_migrations`.
+   - **Engine-Level Trigger Defense:** Normal `UPDATE` and `DELETE` queries executed against ledger tables are unconditionally intercepted and aborted with SQLSTATE `LL007` by trigger functions (`prevent_ledger_mutation`, `prevent_transfer_mutation`, `trg_prevent_audit_mutation`).
+4. **Supporting Implementation or Test Evidence:**
+   - [`backend/tests/ledger.test.js`](file:///d:/LedgerLine/backend/tests/ledger.test.js) &mdash; Tests 6 & 7 verify both layers (SQLSTATE 42501 privilege denial for `ledgerline_app` attempting `UPDATE` or `DELETE`, and SQLSTATE LL007 trigger rejection when normal DML is attempted under `ledgerline_owner`).
+5. **Remaining Limitations & Residual Risk:**
+   `ledgerline_app` cannot update or delete ledger entries through its granted application privileges, and database triggers reject normal `UPDATE` and `DELETE` operations. The privileged schema owner remains a trust boundary capable of altering schema or triggers. Do not claim absolute impossibility of bypass; immutability is enforced against application-level operations, but does not represent an absolute impossibility of bypass by privileged database administrators or compromised host credentials. Database host and owner credentials must be protected through strict out-of-band operational controls.
 
 ---
 
-## 8. Phase 6: Banking Functionality, Refusal Auditing & Account Statements
+### 4.5 First-Admin Bootstrap Race Conditions & Advisory Locking
+1. **Threat & Potential Impact:** During initial deployment, an unauthenticated attacker races the administrator to claim initial ownership of the system, gaining total administrative privileges.
+2. **Relevant Attack Scenario:** An attacker monitors public network traffic or repeatedly queries an onboarding endpoint to register as the first administrator before the legitimate operator can act.
+3. **Implemented Mitigation:**
+   - There is **no HTTP bootstrap endpoint**. Bootstrap cannot be invoked over the network.
+   - Initial bootstrap is executed strictly via local CLI: `node backend/src/scripts/seed-admin.js` (`npm run seed:admin`).
+   - The CLI connects strictly as schema owner `ledgerline_owner` using credentials from `backend/.env`.
+   - The CLI acquires a PostgreSQL 64-bit transactional advisory lock (`seed_admin_bootstrap = 8273645192837461n`) and invokes stored procedure `public.admin_bootstrap_seed(...)`.
+   - The procedure verifies whether any active administrator already exists in `public.users`. If an administrator exists, it aborts immediately with SQLSTATE `LL007` ("Administrator user already bootstrapped").
+4. **Supporting Implementation or Test Evidence:**
+   - [`backend/src/scripts/seed-admin.js`](file:///d:/LedgerLine/backend/src/scripts/seed-admin.js).
+   - [`database/migrations/004_create_users_and_authentication.sql`](file:///d:/LedgerLine/database/migrations/004_create_users_and_authentication.sql) &mdash; `admin_bootstrap_seed` function.
+5. **Remaining Limitations & Residual Risk:**
+   The operator must protect the `backend/.env` file containing `ADMIN_PASSWORD` and delete or rotate credentials following one-time bootstrap.
 
-### 8.1 Cash Deposits, Withdrawals & Cash Clearing Invariant
-* **Threat:** Cash operations enter or exit the platform as single-legged updates, breaking double-entry conservation and distorting system balance accounting.
-* **Mitigation:**
-  - Dedicated internal clearing account: `SYSTEM_CASH_CLEARING` (`00000000-0000-0000-0000-000000000002`, `account_type = 'system_clearing'`).
-  - Cash deposit: Debits `SYSTEM_CASH_CLEARING`, credits customer account.
-  - Cash withdrawal: Debits customer account, credits `SYSTEM_CASH_CLEARING`.
-  - Deferred constraint trigger `trg_verify_transfer_balance` validates that exactly two balanced ledger entries (one debit, one credit) match the transfer amount paise before transaction commit.
-  - Trigger `trg_prevent_account_ownership_reassignment` strictly prohibits assigning a user owner to `SYSTEM_CASH_CLEARING` on `INSERT` or `UPDATE`.
+---
 
-### 8.2 Customer Overdraft Prevention & Safe Integer Arithmetic
-* **Threat:** High-concurrency withdrawal requests overdraw customer balances into negative amounts, or numeric overflow in 64-bit integers causes silent balance distortion.
-* **Mitigation:**
-  - PostgreSQL `BIGINT` range safety: Amounts exceeding $9{,}223{,}372{,}036{,}854{,}775{,}807$ (`PG_MAX_BIGINT`) or non-safe integers are rejected with HTTP 400 before database queries.
-  - Deterministic pessimistic row-locking (`ORDER BY id ASC FOR UPDATE`) serializes competing withdrawals.
-  - Defense-in-depth conditional database update: `UPDATE accounts SET balance_paise = balance_paise - $1 WHERE id = $2 AND balance_paise >= $1`. If rowCount is 0, the transaction immediately rolls back and records an audited refusal.
+### 4.6 Account Ownership Reassignment & Immutability Triggers
+1. **Threat & Potential Impact:** A compromised or rogue administrator reassigns a high-balance customer account to an attacker-controlled user identity.
+2. **Relevant Attack Scenario:** An admin submits `POST /api/admin/accounts/:id/owner` targeting an account that already belongs to Alice, setting `userId` to Eve.
+3. **Implemented Mitigation:**
+   - In stored procedure `public.admin_assign_account_owner`, PostgreSQL checks `a.user_id IS NOT NULL`. If already assigned, it raises error `LL007` ("Account ownership is immutable once assigned").
+   - **Database Defense-in-Depth:** Trigger `trg_prevent_account_ownership_reassignment` on `public.accounts` intercepts all SQL statements: if `OLD.user_id IS NOT NULL AND NEW.user_id IS DISTINCT FROM OLD.user_id`, the trigger unconditionally raises `LL007`.
+   - System accounts (`00000000-0000-0000-0000-000000000001`, `00000000-0000-0000-0000-000000000002`) cannot be assigned to user owners (`422`).
+4. **Supporting Implementation or Test Evidence:**
+   - [`backend/tests/rbac.test.js`](file:///d:/LedgerLine/backend/tests/rbac.test.js) &mdash; Account ownership immutability tests.
+   - [`frontend/src/test/admin.test.jsx`](file:///d:/LedgerLine/frontend/src/test/admin.test.jsx) &mdash; Assignment disabled for owned accounts in UI.
+5. **Remaining Limitations & Residual Risk:**
+   Legitimate legal transfers of ownership (e.g. court-ordered probate) cannot be accomplished by modifying the account record; a new account must be opened and funds transferred via an audited ledger transaction.
 
-### 8.3 Contiguous Per-Account Sequencing
-* **Threat:** Parallel transfers create ambiguous or interleaved entry orders for an account without a deterministic, tamper-evident sequence.
-* **Mitigation:**
-  - Per-account atomic counter: `accounts.next_entry_sequence` is read and incremented within the same transaction that updates balances and writes ledger entries.
-  - Partial unique index: `CREATE UNIQUE INDEX uq_ledger_entries_account_seq ON ledger_entries(account_id, account_entry_sequence) WHERE account_entry_sequence IS NOT NULL` guarantees unique, contiguous sequence numbers per account.
-  - Legacy preservation: Legacy Phase 1–5 ledger entries maintain `account_entry_sequence = NULL` without historical distortion.
+---
 
-### 8.4 Concurrency & Deadlock Risk Reduction Disclaimer
-* **Threat:** Circular locking between concurrent transactions creates database deadlocks.
-* **Mitigation & Limitation:**
-  - All multi-account operations acquire locks in deterministic UUID order (`ORDER BY id ASC FOR UPDATE`).
-  - **Disclaimer:** Deterministic row-lock ordering significantly reduces pairwise deadlocks when concurrent transactions access the same accounts, but does not eliminate every possible deadlock scenario across complex multi-table transactions or under high database lock contention.
+### 4.7 Insecure Direct Object References (IDOR) & Account-Level Authorization
+1. **Threat & Potential Impact:** An account holder views or drains another customer's account by guessing or manipulating UUID parameters in HTTP paths.
+2. **Relevant Attack Scenario:** Alice (`account_holder`) discovers Bob's account UUID and issues `GET /api/accounts/:id`, `GET /api/accounts/:id/statement`, or `POST /api/transfers` with Bob's account as `sourceAccountId`.
+3. **Implemented Mitigation:**
+   - Every protected route enforces `authenticateJWT` and extracts `req.user.id`.
+   - `GET /api/accounts` filters rows strictly to `user_id = req.user.id`.
+   - `GET /api/accounts/:id` and `GET /api/accounts/:id/statement` check `account.user_id === req.user.id`. If non-owned or unassigned, returns HTTP `403 Forbidden`.
+   - `POST /api/transfers` locks the source account inside the transaction and enforces `sourceAccount.user_id === req.user.id`.
+   - Auditors are strictly read-only; attempting any mutating transfer, reversal, or account creation returns HTTP `403 Forbidden`.
+4. **Supporting Implementation or Test Evidence:**
+   - [`backend/tests/rbac.test.js`](file:///d:/LedgerLine/backend/tests/rbac.test.js) &mdash; 26 tests verifying IDOR prevention across listing, inspection, transfers, and reversals.
+5. **Remaining Limitations & Residual Risk:**
+   Express middleware is the sole authorization authority. PostgreSQL `SECURITY DEFINER` functions enforce table invariants, but do not independently verify HTTP caller identity or JWT claims.
 
-### 8.5 Refusal Audit Persistence Policy
-* **Threat:** Financial refusal auditing leaks locks, fails silently on foreign-key errors, or falsely claims audit durability after insertion failures.
-* **Mitigation:**
-  - Rollback and release first: The financial database client is explicitly rolled back (`ROLLBACK`) and released to the connection pool before refusal auditing is attempted.
-  - Foreign-key protection on 404s: For nonexistent accounts, `account_id` is persisted as `NULL`, and the attempted account UUID is preserved in `reason_message`.
-  - Failure transparency: If audit persistence fails, the service returns HTTP 500 with `durableAudit: false`, emits a structured critical `stderr` JSON log, and never retries the financial operation.
-  - Immutability: Table `audit_refused_attempts` is append-only and protected by trigger `trg_prevent_audit_mutation` against `UPDATE` or `DELETE`. Anonymous 401 requests are never audited.
+---
 
-### 8.6 Dual-Regime Statement Ordering & Pagination Shifting
-* **Threat:** Historical unsequenced ledger entries collide with post-cutover sequenced entries, or offset pagination produces inconsistent result sets.
-* **Mitigation & Limitation:**
-  - Total ordering SQL clause: Legacy entries (`sequence IS NULL`) are ordered chronologically by `created_at ASC, id ASC`; post-cutover entries are ordered strictly by `account_entry_sequence ASC, id ASC`.
-  - Legacy labeling: Legacy rows are explicitly tagged `regime: 'legacy_unsequenced'` with an explanatory historical note.
-  - Refused attempts isolation: Refused attempts reside in a separate response property and are included only when `include_refused=true`.
-  - **Pagination Limitation:** In an active ledger, offset pagination across separate requests can shift if concurrent transactions append new entries. This limitation is explicitly returned in `statement.pagination.note`.
+### 4.8 Role Escalation, Registration Restrictions & Live User Status
+1. **Threat & Potential Impact:** An attacker registers with `role: 'admin'`, modifies their role in profile updates, or continues executing transactions using a valid JWT after administrative deactivation.
+2. **Relevant Attack Scenario:**
+   - An attacker submits `POST /api/auth/register` with `{ "username": "eve", "role": "admin" }`.
+   - An employee dismissed for fraud continues using a JWT that has 24 hours of remaining validity.
+3. **Implemented Mitigation:**
+   - **Registration Role Protection:** Registration ignores any client-supplied `role` parameter; all registrations default strictly to `account_holder`.
+   - **Stateless Minimal JWT:** Issued tokens contain only immutable identity claim `sub: user.id`. They do **not** bake dynamic roles or active status into the JWT payload.
+   - **Dynamic Profile Resolution:** On every authenticated request, `authenticateJWT` queries `public.users` live. If the user no longer exists, it returns HTTP `401 Unauthorized`. If `is_active === false`, it immediately returns HTTP `403 Forbidden`.
+   - Role demotions and account deactivations take effect immediately on the very next HTTP call.
+4. **Supporting Implementation or Test Evidence:**
+   - [`backend/tests/auth.test.js`](file:///d:/LedgerLine/backend/tests/auth.test.js) &mdash; Registration role escalation rejection, deactivated user rejection, dynamic database role reflection.
+5. **Remaining Limitations & Residual Risk:**
+   Querying `public.users` on every request introduces database load. In high-throughput production environments, this lookup requires an in-memory cache (e.g. Redis) with explicit cache eviction upon administrative mutation.
+
+---
+
+### 4.9 Password Handling, JWT Secrets & Frontend Token Storage
+1. **Threat & Potential Impact:** Password database compromise, brute-force enumeration, token forgery via weak secrets, or persistent token theft via browser local storage.
+2. **Relevant Attack Scenario:**
+   - An attacker attempts timing attacks during login to enumerate registered email addresses.
+   - An attacker extracts long-lived authentication tokens from browser `localStorage` via persistent XSS.
+3. **Implemented Mitigation:**
+   - **Bcrypt Work Factor 12:** Passwords hashed with `bcryptjs` using 12 salt rounds. Passwords require a minimum of 8 characters, at least 1 letter, and at least 1 number.
+   - **Timing Mitigation (`dummyVerifyPassword`):** When an email is not found in `public.users`, `auth.js` runs `dummyVerifyPassword` against a precomputed work-factor-12 dummy hash, equalizing response latency and mitigating user enumeration.
+   - **Token Storage Policy:** The React frontend stores JWT tokens in-memory in React state, with tab-scoped fallback to `sessionStorage` (`ledgerline_session_token`) to survive page reloads within an active tab. Persistent `localStorage` is intentionally avoided so tokens are wiped when the browser tab closes.
+4. **Supporting Implementation or Test Evidence:**
+   - [`backend/src/utils/password.js`](file:///d:/LedgerLine/backend/src/utils/password.js) &mdash; `hashPassword`, `verifyPassword`, `dummyVerifyPassword`.
+   - [`frontend/src/api/client.js`](file:///d:/LedgerLine/frontend/src/api/client.js) &mdash; In-memory and `sessionStorage` token management.
+5. **Remaining Limitations & Residual Risk:**
+   Same-origin scripts running within the active tab lifecycle could access `sessionStorage` if an XSS vulnerability existed. Subresource integrity (SRI) and Content Security Policy (CSP) headers must be enforced in production deployments.
+
+---
+
+### 4.10 Refused-Attempt Audit Persistence Failures & Foreign-Key Safety
+1. **Threat & Potential Impact:** Financial refusal auditing leaks database locks, fails on foreign-key errors, or silently conceals financial denial-of-service attempts.
+2. **Relevant Attack Scenario:** An attacker repeatedly attempts transactions against nonexistent account UUIDs or with insufficient funds, hoping to crash the audit service.
+3. **Implemented Mitigation:**
+   - **Rollback-Release-Audit Ordering:** The financial transaction is explicitly rolled back (`ROLLBACK`) and its database client released to the pool *before* the refusal audit record is inserted on an independent connection.
+   - **Foreign-Key Safety on 404s:** For nonexistent account UUIDs, `account_id` is set to `NULL` and the attempted UUID is preserved in `reason_message`, preventing foreign-key constraint violations on `audit_refused_attempts`.
+   - **Transparency & Durability:** If audit insertion fails, the service returns HTTP 500 with `durableAudit: false`, emits structured critical `stderr` logs, and never retries the financial operation.
+   - Table `audit_refused_attempts` is append-only and protected by trigger `trg_prevent_audit_mutation`.
+4. **Supporting Implementation or Test Evidence:**
+   - [`backend/tests/audit.test.js`](file:///d:/LedgerLine/backend/tests/audit.test.js) &mdash; 10 tests verifying action support, rollback ordering, 404 safety, and immutability triggers.
+5. **Remaining Limitations & Residual Risk:**
+   Anonymous (unauthenticated) 401 requests are not audited to prevent denial-of-service database flooding from unauthenticated attackers.
+
+---
+
+### 4.11 Cash Clearing Account Manipulation & Accounting Boundary
+1. **Threat & Potential Impact:** Single-legged deposits or withdrawals create unbacked currency or break double-entry balance conservation.
+2. **Relevant Attack Scenario:** An operator attempts to deposit funds into a customer account without debiting a counterparty account, creating unbacked money out of thin air.
+3. **Implemented Mitigation:**
+   - Dedicated internal clearing account: `SYSTEM_CASH_CLEARING` (`00000000-0000-0000-0000-000000000002`).
+   - Cash deposits debit `SYSTEM_CASH_CLEARING` and credit the customer account.
+   - Cash withdrawals debit the customer account and credit `SYSTEM_CASH_CLEARING`.
+   - Deferred constraint trigger `trg_verify_transfer_balance` verifies that two balanced ledger entries (one debit, one credit) match the transfer amount before transaction commit.
+   - `SYSTEM_CASH_CLEARING` is protected by `trg_prevent_account_ownership_reassignment` and cannot be owned by any user.
+4. **Supporting Implementation or Test Evidence:**
+   - [`backend/tests/deposits.test.js`](file:///d:/LedgerLine/backend/tests/deposits.test.js) (15 tests).
+   - [`backend/tests/withdrawals.test.js`](file:///d:/LedgerLine/backend/tests/withdrawals.test.js) (16 tests).
+5. **Remaining Limitations & Residual Risk:**
+   `SYSTEM_CASH_CLEARING` is strictly an internal zero-sum accounting counter-account. It is not legal proof of physical currency, cash vaults, or central bank reserves.
+
+---
+
+### 4.12 Operational & Deployment Script Preflight Guards
+1. **Threat & Potential Impact:** Accidental execution of tests or administrative scripts against a live production database, polluting or mutating real financial records.
+2. **Relevant Attack Scenario:** An operator executes a verification script or test suite while their environment is configured to a production database.
+3. **Implemented Mitigation (Verified Against Actual Scripts):**
+   - **Test Connection Pool Isolation:** Backend test helpers ([`backend/tests/helpers/auth.js`](file:///d:/LedgerLine/backend/tests/helpers/auth.js)) explicitly specify `database: 'ledgerline_test'` for all test connections, preventing test fixtures from targeting the development database.
+   - **Preflight Strict Pre-Connection Guard:** In [`backend/src/scripts/preflight_006.js`](file:///d:/LedgerLine/backend/src/scripts/preflight_006.js), lines 62–95 verify that `backend/.env` exists, audit all database configuration keys for conflicts with `process.env`, and enforce a strict pre-connection guard:
+     ```javascript
+     if (!targetDb || targetDb !== 'ledgerline_test') {
+       console.error(`[FATAL GUARD] DB_NAME must be explicitly set to 'ledgerline_test'. Received: '${targetDb}'. Aborting without connecting.`);
+       process.exit(1);
+     }
+     ```
+   - **Forward-Only Migrations:** In [`backend/src/scripts/migrate.js`](file:///d:/LedgerLine/backend/src/scripts/migrate.js), migrations are applied in forward-only transactions recorded in `schema_migrations`; they contain zero `DROP TABLE` or `TRUNCATE` statements.
+   - **Deployment Status:** Production deployment is currently **Pending Deployment**; no production databases are connected.
+4. **Supporting Implementation or Test Evidence:**
+   - [`backend/src/scripts/preflight_006.js`](file:///d:/LedgerLine/backend/src/scripts/preflight_006.js) lines 1–120.
+   - [`backend/src/scripts/migrate.js`](file:///d:/LedgerLine/backend/src/scripts/migrate.js).
+   - [`backend/tests/helpers/auth.js`](file:///d:/LedgerLine/backend/tests/helpers/auth.js).
+5. **Remaining Limitations & Residual Risk:**
+   The migration runner `migrate.js` connects to whatever `DB_NAME` is configured in `backend/.env` without a hardcoded database name guard. Operators must verify environment variables before running migrations on production hosts.
+
+---
+
+### 4.13 Trusted Application Boundary & Direct SQL Balance Access
+1. **Threat & Potential Impact:** A script or direct SQL injection vulnerability executing directly as `ledgerline_app` runs `UPDATE accounts SET balance_paise = ...` without writing corresponding double-entry ledger entries.
+2. **Architecture & Boundary Analysis:**
+   - `ledgerline_app` requires column-level `UPDATE (balance_paise, updated_at, next_entry_sequence)` on `public.accounts` to process legitimate transfers, deposits, and withdrawals coordinated by the Express backend.
+   - The deferred constraint trigger `trg_verify_transfer_balance` verifies that transfer records are balanced by ledger entries; it does not intercept direct `accounts` table balance updates if executed outside of a transfer.
+3. **Implemented Mitigation & Trust Boundary:**
+   - The **Express application is the authoritative boundary** responsible for coupling account balance mutations with immutable ledger entries inside atomic database transactions.
+4. **Compensating Control:**
+   - Discrepancies between stored balances and balances reconstructed from ledger entries can be detected by periodic audit reconciliation queries comparing `accounts.balance_paise` against $\sum (\text{credits} - \text{debits})$ from `ledger_entries`. Periodic reconciliation queries are a recommended operational control and are not currently implemented as an automated scheduled service.
+5. **Remaining Limitations & Residual Risk:**
+   Direct SQL updates executed outside the Express application bypass ledger coupling. Periodic reconciliation queries are a recommended operational control and are not currently implemented as an automated scheduled service; balance drift caused by rogue direct SQL access must be verified through manual or external batch operational queries.
+
+---
+
+## 5. STRIDE Threat Mapping Matrix
+
+| Category | Component | Specific Risk | Implemented Mitigation | Residual Risk |
+| :--- | :--- | :--- | :--- | :--- |
+| **Spoofing** | Auth / HTTP | Token forgery or stolen credentials | Bcrypt work factor 12, timing mitigation, stateless Bearer JWT with live database validation | Token theft via active tab XSS before tab close |
+| **Tampering** | Ledger / DB | Altering historical ledger rows or balances | Append-only triggers (`LL007`), deferred constraint balancing (`LL001`–`LL004`), least-privilege role grants | Direct balance updates outside Express require operational reconciliation (periodic reconciliation queries are a recommended operational control and are not currently implemented as an automated scheduled service) |
+| **Repudiation** | Mutating APIs | Denying a transfer or withdrawal | Append-only `ledger_entries`, `audit_refused_attempts`, and unique idempotency keys | Refusals for anonymous 401s are unlogged |
+| **Information Disclosure** | API / DB | Balance leakage or customer enumeration | Strict ownership isolation (IDOR checks), dummy bcrypt verification, `.gitignore` of `*.env` | Errors during development should be sanitized in production |
+| **Denial of Service** | Transfers / Locking | Deadlocks or connection exhaustion | Deterministic lock ordering (`ORDER BY id ASC`), connection pool bounds (20), bounded idempotency retries | Complex multi-table foreign locks under extreme concurrent load |
+| **Elevation of Privilege** | RBAC / Admin | Regular user escalating to admin | Registration role defaulting, advisory-locked admin functions, last-active-admin protection (`LL007`) | Compromised host system administrator |

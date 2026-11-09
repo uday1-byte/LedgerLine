@@ -1,73 +1,143 @@
-# ⚖️ LedgerLine - Financial Ledger Application
+# ⚖️ LedgerLine — Financial Ledger Application
 
-LedgerLine is a financial ledger application built with Node.js, Express, PostgreSQL, and React with Vite.
+LedgerLine is a full-stack, double-entry financial ledger and banking client application built with **Node.js**, **Express**, **PostgreSQL 18.6**, and **React 18** with **Vite 6**.
+
+It demonstrates core financial engineering principles: exact integer arithmetic (paise), concurrency-safe transaction serialization, append-only immutable ledgers, deferred constraint balancing, cryptographic idempotency, least-privilege database role separation, role-based access control (RBAC), and automated refusal auditing.
+
+> [!NOTE]
+> **Deployment Status:** **Pending Deployment**. All database migrations, backend APIs, frontend client interfaces, and automated test suites (244 automated tests: 129 backend, 115 frontend) are fully verified and committed locally. The application has not yet been deployed to external production environments.
 
 ---
 
 ## 🛠️ Technology Stack
 
-| Layer | Technology | Details |
-| :--- | :--- | :--- |
-| **Frontend** | React 18, Vite | Single page application with `/api` dev proxy |
-| **Backend** | Node.js (v22+), Express | RESTful API with Zod validation and centralized error handling |
-| **Database** | PostgreSQL 18.6 | Relational database (`ledgerline_dev` on port 5432) |
-| **Database Access** | `node-postgres` (`pg`) | Connection pool (`pg.Pool`) with parameterized SQL queries |
-| **Validation** | Zod | Runtime schema validation for request payloads and environment variables |
-| **Testing** | Jest, Supertest | Automated API integration and route testing |
+| Layer | Technology | Version / Specification | Details |
+| :--- | :--- | :--- | :--- |
+| **Frontend Framework** | React | `^18.3.1` | Single Page Application (SPA) with declarative hooks and Context API |
+| **Frontend Tooling** | Vite | `^6.2.0` (installed `6.4.5`) | Ultra-fast ESM bundler with dev proxy (`/api` &rarr; `http://localhost:5000`) |
+| **Routing** | React Router DOM | `^7.18.5` | Client-side routing, protected navigation guards, and history synchronization |
+| **Frontend Testing** | Vitest, JSDOM, RTL | Vitest `^5.1.0`, RTL `^16.3.3` | Headless unit and component integration tests (115 tests across 10 suites) |
+| **DOM Assertions** | Jest-DOM | `@testing-library/jest-dom ^7.0.1` | Custom matchers for accessible DOM element state assertions |
+| **Backend Runtime** | Node.js | v22.19.0 LTS (supports v20+) | Asynchronous I/O runtime |
+| **Backend Framework** | Express | `^5.3.0` | Modular RESTful API architecture with centralized error handling |
+| **Validation** | Zod | `^4.6.7` | Strict runtime request payload and environment variable validation |
+| **Authentication** | JWT & bcryptjs | `jsonwebtoken ^9.0.3`, `bcryptjs ^3.0.3` | Stateless Bearer JWTs; bcrypt with work factor 12 and timing mitigation |
+| **Database** | PostgreSQL | 18.6 | Relational database with stored procedures, triggers, and row-level locking |
+| **Database Driver** | `pg` (`node-postgres`) | `^8.23.1` | Connection pooling (`pg.Pool`) with strictly parameterized SQL queries |
+| **Backend Testing** | Jest, Supertest | Jest `^30.5.2`, Supertest `^7.3.1` | API and concurrency integration tests (129 tests across 11 suites) |
 
 ---
 
-## 📂 Project Structure
+## 📂 Repository Structure
 
 ```text
 LedgerLine/
-├── .env.example              # Template for root/global environment variables
-├── .gitignore                # Protects node_modules, .env secrets, logs, build outputs
-├── package.json              # Root workspace scripts (dev, test, migrate, build)
-├── README.md                 # Complete project documentation and guide
-├── PROMPTS.md                # Development prompt history and architectural decisions
-├── THREATS.md                # STRIDE threat model & financial risk mitigations
+├── .env.example                               # Root template for global environment variables
+├── .gitignore                                 # Git rules ignoring node_modules, *.env, logs, and build artifacts
+├── package.json                               # Root workspace orchestrator scripts (dev, build, test, migrate)
+├── README.md                                  # Complete architecture, operations, and API documentation
+├── THREATS.md                                 # STRIDE threat model, empirical vulnerability findings, and mitigations
+├── PROMPTS.md                                 # AI-assisted engineering log, prompts, error analyses, and commit references
 │
-├── backend/                  # Node.js + Express backend service
-│   ├── .env.example          # Backend-specific environment variables template
-│   ├── jest.config.js        # Jest configuration for backend tests
-│   ├── package.json          # Backend dependencies and scripts
-│   ├── package-lock.json     # Locked dependency graph
+├── backend/                                   # Express REST API service
+│   ├── .env.example                           # Backend configuration template (runtime & owner roles)
+│   ├── jest.config.js                         # Jest test runner configuration
+│   ├── package.json                           # Backend dependencies and scripts
+│   ├── package-lock.json                      # Locked backend dependency graph
 │   ├── src/
-│   │   ├── app.js            # Express application setup, middlewares, and route mounting
-│   │   ├── server.js         # HTTP server entrypoint (listens on PORT)
+│   │   ├── app.js                             # Express application setup, security middleware, and routes
+│   │   ├── server.js                          # HTTP server entry point (listens on PORT)
 │   │   ├── config/
-│   │   │   ├── db.js         # PostgreSQL connection pool (pg.Pool) configuration
-│   │   │   └── env.js        # Environment variable loader & Zod validation schema
+│   │   │   ├── db.js                          # PostgreSQL connection pool (pg.Pool) configuration
+│   │   │   └── env.js                         # Zod-validated environment configuration loader
+│   │   ├── middleware/
+│   │   │   └── auth.js                        # JWT verification, RBAC enforcement, and ownership guards
 │   │   ├── routes/
-│   │   │   ├── health.js     # Health check endpoint (GET /api/health)
-│   │   │   └── transfers.js  # Basic money transfer endpoint (POST /api/transfers)
-│   │   └── scripts/
-│   │       └── migrate.js    # Database migration runner script
+│   │   │   ├── accounts.js                    # Account listing, inspection, and creation endpoints
+│   │   │   ├── admin.js                       # User role/status governance and account ownership assignment
+│   │   │   ├── auth.js                        # User registration, login, and profile (/api/auth/me)
+│   │   │   ├── health.js                      # Public health check endpoint (/api/health)
+│   │   │   └── transfers.js                   # Transfers, reversals, cash deposits, and cash withdrawals
+│   │   ├── scripts/
+│   │   │   ├── migrate.js                     # Forward-only database migration runner
+│   │   │   ├── preflight_006.js               # Phase 6 read-only schema preflight validator
+│   │   │   └── seed-admin.js                  # One-time first-admin bootstrap CLI
+│   │   ├── services/
+│   │   │   └── auditService.js                # Refused-attempt audit logging service
+│   │   └── utils/
+│   │       ├── jwt.js                         # JWT signing and verification helpers
+│   │       └── password.js                    # Bcrypt hashing (work factor 12) and dummy timing mitigation
 │   └── tests/
-│       ├── health.test.js                     # Supertest integration tests for health endpoints
-│       ├── transfers.test.js                  # Supertest tests for basic money transfer endpoint
-│       ├── concurrency.test.js                # Exploratory concurrent transfer test
-│       ├── deterministic-concurrency.test.js  # Deterministic barrier synchronization race condition reproduction test
-│       └── ledger.test.js                     # Phase 4 automated financial integrity & double-entry ledger tests
+│       ├── helpers/
+│       │   └── auth.js                        # Test user and account provisioning helpers (using ownerPool)
+│       ├── audit.test.js                      # Refusal audit service tests (10 tests)
+│       ├── auth.test.js                       # Password policy, bcrypt, and JWT auth tests (13 tests)
+│       ├── concurrency.test.js                # Exploratory concurrent transfer test (1 test)
+│       ├── deposits.test.js                   # Cash deposits and double-entry clearing tests (15 tests)
+│       ├── deterministic-concurrency.test.js  # Barrier-synchronized concurrency regression test (1 test)
+│       ├── health.test.js                     # Public health check endpoint tests (3 tests)
+│       ├── ledger.test.js                     # Double-entry ledger, immutability, and reversal tests (15 tests)
+│       ├── rbac.test.js                       # Role-based access control and IDOR prevention tests (26 tests)
+│       ├── statements.test.js                 # Statement dual-regime ordering and pagination tests (22 tests)
+│       ├── transfers.test.js                  # Transfer business logic and idempotency tests (7 tests)
+│       └── withdrawals.test.js                # Cash withdrawals, solvency, and range tests (16 tests)
 │
-├── frontend/                 # React 18 + Vite frontend client
-│   ├── .env.example          # Frontend-specific environment variables template
-│   ├── index.html            # Vite HTML entry point
-│   ├── package.json          # Frontend dependencies and scripts
-│   ├── package-lock.json     # Locked dependency graph
-│   ├── vite.config.js        # Vite configuration with /api reverse proxy to port 5000
+├── frontend/                                  # React 18 + Vite 6 client application
+│   ├── .env.example                           # Frontend environment configuration template
+│   ├── index.html                             # Single page HTML entry point
+│   ├── package.json                           # Frontend dependencies (React, React Router, Vitest)
+│   ├── package-lock.json                      # Locked frontend dependency graph
+│   ├── vite.config.js                         # Vite build configuration, dev proxy, and Vitest setup
 │   └── src/
-│       ├── main.jsx          # React DOM root render
-│       ├── App.jsx           # Dashboard component with live health check card
-│       └── index.css         # Modern typography and layout styling
+│       ├── main.jsx                           # React DOM root render
+│       ├── App.jsx                            # Main application layout, client router, and protected routes
+│       ├── index.css                          # Accessible CSS styling, layout utilities, and print format
+│       ├── api/
+│       │   └── client.js                      # Centralized API fetch wrapper, token handling, error classifier
+│       ├── context/
+│       │   └── AuthContext.jsx                # React Authentication context, session management, and logout
+│       ├── components/
+│       │   ├── admin/                         # CreateAccountModal, AssignOwnerModal, UserGovernanceForm, tables
+│       │   ├── auditor/                       # AuditorOverviewCard, AuditorAccountsTable
+│       │   ├── common/                        # Alert, ProtectedRoute
+│       │   ├── dashboard/                     # AccountCard, AccountSummary, EmptyAccountState
+│       │   ├── layout/                        # Navbar
+│       │   ├── statements/                    # StatementFilterBar, StatementTable, RefusedAttemptsTable, pagination
+│       │   └── transfers/                     # TransferForm, DepositForm, WithdrawForm, ConfirmationModal, Receipt
+│       ├── pages/
+│       │   ├── AdminPortalPage.jsx            # Account creation, user role governance, status management
+│       │   ├── AuditorPortalPage.jsx          # Read-only ledger registry, balance cards, direct statement links
+│       │   ├── DashboardPage.jsx              # Customer account cards, balance overview, empty states
+│       │   ├── LoginPage.jsx                  # Authentication form with error handling and redirect to origin
+│       │   ├── RegisterPage.jsx               # Registration form enforcing password complexity rules
+│       │   ├── StatementsPage.jsx             # Account statement explorer, filters, totals, pagination, print view
+│       │   └── TransfersPage.jsx              # Transfer, deposit, and withdrawal forms, review modal, receipt
+│       ├── utils/
+│       │   ├── currency.js                    # BigInt paise string parsing and Indian Rupee formatting
+│       │   └── date.js                        # ISO 8601 formatting and explicit UTC/local date range bounding
+│       └── test/
+│           ├── setup.js                       # Vitest DOM environment setup and test cleanup
+│           ├── admin.test.jsx                 # Admin portal integration tests (9 tests)
+│           ├── apiClient.test.js              # Centralized API client tests (8 tests)
+│           ├── auditor.test.jsx               # Auditor read-only portal tests (3 tests)
+│           ├── authContext.test.jsx           # Auth context and session lifecycle tests (4 tests)
+│           ├── authScreens.test.jsx           # Login and Register form tests (20 tests)
+│           ├── currency.test.js               # BigInt currency parsing and formatting tests (17 tests)
+│           ├── dashboard.test.jsx             # Dashboard account cards and summary tests (17 tests)
+│           ├── protectedRoute.test.jsx        # ProtectedRoute client authorization tests (5 tests)
+│           ├── statements.test.jsx            # Statement filter, pagination, and print tests (20 tests)
+│           └── transfers.test.jsx             # Transfer, deposit, and withdrawal UI tests (12 tests)
 │
-└── database/                 # Database schema and migration management
-    ├── README.md             # Migration documentation and conventions
-    └── migrations/           # Versioned SQL migration scripts (.sql)
+└── database/                                  # Database schema migrations and provisioning scripts
+    ├── README.md                              # Migration conventions and execution instructions
+    ├── provision_roles.sql                    # SQL script provisioning ledgerline_owner and ledgerline_app roles
+    └── migrations/                            # Forward-only SQL migrations
         ├── 001_create_accounts_and_transfers.sql
         ├── 002_create_ledger_entries_and_idempotency.sql
-        └── 003_fix_verify_transfer_balance_uuid_aggregation.sql
+        ├── 003_fix_verify_transfer_balance_uuid_aggregation.sql
+        ├── 004_create_users_and_authentication.sql
+        ├── 005_fix_admin_function_column_ambiguity.sql
+        └── 006_complete_banking_functionality.sql
 ```
 
 ---
@@ -75,18 +145,24 @@ LedgerLine/
 ## 🚀 Getting Started
 
 ### 1. Prerequisites
-- **Node.js**: v20 or v22 installed (`node -v`)
+- **Node.js**: v20 or v22 LTS installed (`node -v`)
 - **PostgreSQL**: PostgreSQL 18.6 installed and running locally on port 5432
-- **Database**: Database named `ledgerline_dev` created in PostgreSQL
+- **PostgreSQL Client Tools**: `psql` available in system path
+- **Operating System Shell**: Standard Bash, Zsh, or Windows PowerShell
 
 ### 2. Environment Configuration
-Create `backend/.env` from the provided example template:
+Copy the provided environment example templates:
 
-```powershell
-Copy-Item backend\.env.example backend\.env
+```bash
+# In the repository root
+cp .env.example .env
+cp backend/.env.example backend/.env
+cp frontend/.env.example frontend/.env
 ```
 
-Open `backend\.env` and configure your credentials:
+*(On Windows PowerShell, use `Copy-Item .env.example .env`, `Copy-Item backend\.env.example backend\.env`, and `Copy-Item frontend\.env.example frontend\.env`).*
+
+Configure `backend/.env` with your local PostgreSQL credentials:
 ```env
 PORT=5000
 NODE_ENV=development
@@ -94,508 +170,602 @@ NODE_ENV=development
 DB_HOST=localhost
 DB_PORT=5432
 DB_NAME=ledgerline_dev
-DB_USER=postgres
-DB_PASSWORD=your_actual_postgres_password_here
 
+# Runtime Application User (used by Node.js server)
+DB_USER=ledgerline_app
+DB_PASSWORD=your_secure_app_password
+
+# Migration Runner Role (used by migrate.js to execute DDL as schema owner)
+MIGRATION_DB_USER=ledgerline_owner
+MIGRATION_DB_PASSWORD=your_secure_owner_password
+
+# Authentication & Security
 # Generate a secure 32+ character key: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 JWT_SECRET=replace_with_a_secure_random_jwt_secret_at_least_32_characters
 JWT_EXPIRES_IN=24h
+
+# Admin Bootstrap CLI (used by npm run seed:admin)
+ADMIN_USERNAME=admin
+ADMIN_EMAIL=admin@ledgerline.internal
+ADMIN_PASSWORD=your_secure_admin_password_here
+
+# Client Application URL (For CORS configuration)
 CLIENT_URL=http://localhost:5173
 ```
 
-### 3. Fresh Database Provisioning & Migrations Setup Sequence
+### 3. Database Provisioning & Schema Migrations
 
-To set up a fresh database (e.g. `ledgerline_dev` or an isolated test database `ledgerline_test`) reliably:
+Follow this exact sequence to set up a clean, role-separated PostgreSQL database:
 
 1. **Create the Database (as postgres administrator):**
    ```sql
    CREATE DATABASE ledgerline_dev;
    ```
 2. **Provision Roles & Schema Ownership (as postgres administrator in the database):**
-   ```powershell
+   ```bash
    psql -d ledgerline_dev -f database/provision_roles.sql
    ```
-   *(Creates `ledgerline_owner` and `ledgerline_app`, assigns `public` schema ownership to `ledgerline_owner`, and revokes default public access).*
-3. **Provision Role Passwords out-of-band (never committed to Git):**
+   *Creates `ledgerline_owner` and `ledgerline_app`, assigns `public` schema ownership to `ledgerline_owner`, and revokes default public access.*
+3. **Set Role Passwords out-of-band (never committed to Git):**
    ```sql
-   ALTER ROLE ledgerline_owner WITH PASSWORD 'your_owner_password_here';
-   ALTER ROLE ledgerline_app WITH PASSWORD 'your_app_password_here';
+   ALTER ROLE ledgerline_owner WITH PASSWORD 'your_secure_owner_password';
+   ALTER ROLE ledgerline_app WITH PASSWORD 'your_secure_app_password';
    ```
-4. **Run Database Migrations (as `ledgerline_owner`):**
-   ```powershell
+4. **Execute Database Migrations (as `ledgerline_owner`):**
+   ```bash
    npm run migrate:backend
    ```
-   *(Executes migrations via `migrate.js` using `MIGRATION_DB_USER=ledgerline_owner`, creating tables and assigning runtime least-privilege grants to `ledgerline_app`).*
-5. **Start Runtime Application (as `ledgerline_app`):**
-   ```powershell
-   npm run dev:backend
+   *Runs migrations 001 through 006, creating tables, triggers, and indices, and assigns least-privilege grants to `ledgerline_app`.*
+5. **Bootstrap Initial Administrator User:**
+   ```bash
+   npm --prefix backend run seed:admin
    ```
+   *Connects strictly as `ledgerline_owner` using advisory lock `seed_admin_bootstrap` to create the initial admin user specified in `backend/.env`.*
 
 ---
 
-## 💻 Commands to Run the Project
+## 💻 Commands Reference
 
-### From Root Directory:
+### Root Directory Commands
 
 | Command | Action |
 | :--- | :--- |
-| `npm run dev:backend` | Starts the Express API server with live reload (`nodemon`) on port 5000 |
-| `npm run dev:frontend` | Starts the Vite React dev server on port 5173 |
-| `npm run test:backend` | Executes the Jest and Supertest test suite |
-| `npm run migrate:backend` | Runs outstanding database migrations |
-| `npm run build:frontend` | Compiles the production React bundle into `frontend/dist` |
+| `npm run dev:backend` | Starts Express backend server with `nodemon` live-reload on port 5000 |
+| `npm run dev:frontend` | Starts Vite React frontend development server on port 5173 |
+| `npm run start:backend` | Starts Express backend server in production mode |
+| `npm run migrate:backend` | Runs outstanding database migrations as `ledgerline_owner` |
+| `npm run test:backend` | Runs the complete Jest backend test suite (129 tests) |
+| `npm run build:frontend` | Compiles production React bundle into `frontend/dist/` |
 
----
+### Frontend-Specific Commands
 
-## 📡 Verified API Endpoints
+```bash
+# Run the complete Vitest frontend test suite (115 tests)
+npm --prefix frontend test -- --run
 
-### 1. Health Check
-* **Endpoint:** `GET /api/health`
-* **Response Status:** `200 OK`
-* **Response:**
-  ```json
-  {
-    "status": "healthy",
-    "service": "LedgerLine API",
-    "environment": "development",
-    "uptime": "4.2s",
-    "timestamp": "2026-11-07T11:40:00.000Z",
-    "database": { "status": "untested" }
-  }
-  ```
+# Run Vitest in interactive watch mode
+npm --prefix frontend test
 
-### 2. User Authentication (Phase 5 Step 1)
+# Run frontend production build
+npm --prefix frontend run build
 
-#### A. User Registration
-* **Endpoint:** `POST /api/auth/register`
-* **Access:** Public
-* **Security Standards:** Passwords hashed with `bcryptjs` (work factor 12). Passwords must be at least 8 characters long and contain at least one letter and one number. Attempted role escalation is ignored or rejected; all registered users default strictly to `account_holder`.
-* **Request Body:**
-  ```json
-  {
-    "username": "alice",
-    "email": "alice@example.com",
-    "password": "SecurePassword123"
-  }
-  ```
-* **Success Response (201 Created):**
-  ```json
-  {
-    "message": "User registered successfully",
-    "user": {
-      "id": "e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a01",
-      "username": "alice",
-      "email": "alice@example.com",
-      "role": "account_holder",
-      "isActive": true,
-      "createdAt": "2026-11-08T14:00:00.000Z"
-    }
-  }
-  ```
-* **Error Responses:**
-  * `400 Bad Request`: Validation failure (weak password, invalid email format, missing fields).
-  * `409 Conflict`: Username or email already registered.
-
-#### B. User Login
-* **Endpoint:** `POST /api/auth/login`
-* **Access:** Public
-* **Timing Mitigation:** Unknown emails trigger dummy bcrypt verification (`dummyVerifyPassword`) against a precomputed work-factor-12 hash, reducing timing differences and helping mitigate email enumeration.
-* **Stateless Minimal JWT:** Issued tokens contain only immutable identity claims (`sub: user.id`). Dynamic attributes (role, active status) are queried live from `public.users` on every authenticated request, ensuring immediate revocation upon role demotion or account deactivation.
-* **Request Body:**
-  ```json
-  {
-    "email": "alice@example.com",
-    "password": "SecurePassword123"
-  }
-  ```
-* **Success Response (200 OK):**
-  ```json
-  {
-    "message": "Login successful",
-    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-    "user": {
-      "id": "e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a01",
-      "username": "alice",
-      "email": "alice@example.com",
-      "role": "account_holder",
-      "isActive": true
-    }
-  }
-  ```
-* **Error Responses:**
-  * `401 Unauthorized`: Invalid email or password (safe, generic error message).
-
-#### C. Current User Profile
-* **Endpoint:** `GET /api/auth/me`
-* **Access:** Private (`account_holder`, `admin`, `auditor`)
-* **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
-* **Success Response (200 OK):** Returns the live database user profile. Deleted users are rejected with `401 Unauthorized` (`User no longer exists`), while deactivated users (`is_active = false`) are rejected with `403 Forbidden` (`User account is deactivated`).
-
----
-
-### 3. Account Inspection & Provisioning (Phase 5 Step 2)
-
-#### A. List Accounts
-* **Endpoint:** `GET /api/accounts`
-* **Access:** Private (`account_holder`, `admin`, `auditor`)
-* **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
-* **Ownership Isolation:**
-  * `account_holder`: Filters rows strictly to accounts assigned to their own user identity (`WHERE user_id = req.user.id AND account_type = 'customer'`). Accounts belonging to other users or unassigned accounts are never returned.
-  * `admin` and `auditor`: Can inspect all system and customer accounts.
-
-#### B. Inspect Single Account
-* **Endpoint:** `GET /api/accounts/:id`
-* **Access:** Private (`account_holder`, `admin`, `auditor`)
-* **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
-* **Authorization Policy:**
-  * `account_holder`: Can only view their own assigned account. Accessing an unassigned account or an account owned by another user returns `403 Forbidden`.
-  * `admin` and `auditor`: Can view any account.
-* **Error Responses:**
-  * `400 Bad Request`: Malformed UUID parameter.
-  * `403 Forbidden`: Access denied (account not owned by caller).
-  * `404 Not Found`: Account does not exist.
-
-#### C. Create Customer Account
-* **Endpoint:** `POST /api/accounts`
-* **Access:** Private (`admin` only)
-* **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
-* **Least-Privilege Enforcement:** Created strictly unassigned (`user_id = NULL`) with zero initial balance (`balance_paise = 0`), complying with the runtime role's column-level grant: `INSERT (account_number)`.
-* **Request Body:**
-  ```json
-  {
-    "accountNumber": "ACC_CUSTOMER_1001"
-  }
-  ```
-* **Success Response (201 Created):** Returns created account object.
-
----
-
-### 4. Administrative Operations (Phase 5 Step 2)
-
-All administrative endpoints require `admin` role and delegate invariant enforcement to transactional PostgreSQL administrative functions (`SECURITY DEFINER`):
-
-#### A. Update User Role
-* **Endpoint:** `PATCH /api/admin/users/:id/role`
-* **Access:** Private (`admin` only)
-* **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
-* **Function:** `public.admin_update_user_role(target_user_id, new_role)`
-* **Last-Admin Protection:** Serialized via PostgreSQL advisory lock (`admin_membership_lock`). Rejects demoting the last active administrator with HTTP `422 Unprocessable Entity` (`LL007`).
-* **Request Body:** `{ "role": "auditor" }`
-
-#### B. Set User Active Status
-* **Endpoint:** `PATCH /api/admin/users/:id/status`
-* **Access:** Private (`admin` only)
-* **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
-* **Function:** `public.admin_set_user_status(target_user_id, is_active)`
-* **Last-Admin Protection:** Rejects deactivating the last active administrator with HTTP `422 Unprocessable Entity` (`LL007`).
-* **Request Body:** `{ "isActive": false }`
-
-#### C. Assign Account Owner
-* **Endpoint:** `POST /api/admin/accounts/:id/owner`
-* **Access:** Private (`admin` only)
-* **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
-* **Function:** `public.admin_assign_account_owner(account_id, target_user_id)`
-* **Invariants Enforced:**
-  * Account ownership is **immutable once assigned** (reassigning returns `422`).
-  * System equity accounts (`00000000-0000-0000-0000-000000000001`) cannot be assigned to user owners (returns `422`).
-  * Target user must exist and be active (`is_active = true`, returns `422` if inactive).
-  * Missing user or missing account returns HTTP `404 Not Found` (`P0002` / `LL002`).
-* **Request Body:** `{ "userId": "e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a01" }`
-
----
-
-### 5. Money Transfers (Phase 4 Double-Entry, Idempotent & RBAC-Protected)
-* **Endpoint:** `POST /api/transfers`
-* **Access:** Private (`account_holder`, `admin`)
-* **Headers:**
-  * `Authorization: Bearer <jwt-token>` (Mandatory)
-  * `Idempotency-Key: <unique-client-key>` (Mandatory)
-* **Authorization Policy:**
-  * `account_holder`: Enforced inside the database transaction after pessimistic row locking (`SELECT ... FOR UPDATE`). Verifies `sourceAccount.user_id === req.user.id`. Transferring out of unassigned accounts or accounts owned by other users returns `403 Forbidden`.
-  * `admin`: Permitted to execute transfers between accounts.
-  * `auditor`: Strictly read-only compliance role; blocked from initiating transfers (`403 Forbidden`).
-* **Context:** In this example, the source account has an initial balance of 100,000 paise (₹1,000.00) and the destination account has an initial balance of 50,000 paise (₹500.00).
-* **Request Body:**
-  ```json
-  {
-    "sourceAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
-    "destinationAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
-    "amountPaise": 30000
-  }
-  ```
-* **Success Response (201 Created):**
-  ```json
-  {
-    "message": "Transfer completed successfully",
-    "transfer": {
-      "id": "c2eebc99-9c0b-4ef8-bb6d-6bb9bd380a33",
-      "sourceAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
-      "destinationAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
-      "amountPaise": "30000",
-      "status": "completed",
-      "transferType": "customer_transfer",
-      "createdAt": "2026-11-08T12:00:00.000Z"
-    },
-    "updatedBalances": {
-      "sourceAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
-      "sourceBalancePaise": "70000",
-      "destinationAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
-      "destinationBalancePaise": "80000"
-    }
-  }
-  ```
-* **Idempotent Replay Response (201 Created):**
-  Returns identical body with HTTP response header `Idempotent-Replayed: true`.
-* **Error Responses:**
-  * `400 Bad Request`: Missing `Idempotency-Key` header or input validation failed.
-  * `401 Unauthorized`: Missing, expired, or invalid Bearer token.
-  * `403 Forbidden`: Account holder does not own the funding source account, or caller is an auditor.
-  * `404 Not Found`: Source or destination account not found.
-  * `409 Conflict`: Re-sending same idempotency key with conflicting request payload parameters.
-  * `422 Unprocessable Entity`: Sender has insufficient funds (rolls back transaction and idempotency reservation, allowing retry with same key once funded).
-
-### 6. Transfer Reversals (Phase 4 Compensating Ledger Reversal & RBAC-Protected)
-* **Endpoint:** `POST /api/transfers/:id/reversal`
-* **Access:** Private (`account_holder`, `admin`)
-* **Headers:**
-  * `Authorization: Bearer <jwt-token>` (Mandatory)
-  * `Idempotency-Key: <unique-client-key>` (Mandatory)
-* **Authorization Policy:**
-  * A reversal debits funds from the original recipient and returns them to the original sender.
-  * `account_holder`: Enforced inside the database transaction after pessimistic row locking. Verifies that the caller owns the *debited* account (`debitedAccount.user_id === req.user.id`). An account holder cannot unilaterally claw back money they previously sent to another user (`403 Forbidden`).
-  * `admin`: Permitted to execute reversals.
-  * `auditor`: Strictly read-only compliance role; blocked from initiating reversals (`403 Forbidden`).
-* **Audit & Immutability Guarantee:** The original completed transfer record is **never modified or updated**. Instead, an explicit compensating transfer record (`transfer_type = 'reversal'`) and dual compensating ledger entries are created.
-* **Reversal Lookup Pattern:** To verify whether a completed transfer has been reversed, applications and auditors query:
-  ```sql
-  SELECT * FROM transfers
-  WHERE original_transfer_id = :originalTransferId
-    AND transfer_type = 'reversal';
-  ```
-* **Request Body:**
-  ```json
-  {
-    "reversalReason": "Customer dispute resolved"
-  }
-  ```
-* **Success Response (201 Created):**
-  ```json
-  {
-    "message": "Transfer reversed successfully",
-    "reversal": {
-      "id": "d3eebc99-9c0b-4ef8-bb6d-6bb9bd380a44",
-      "originalTransferId": "c2eebc99-9c0b-4ef8-bb6d-6bb9bd380a33",
-      "sourceAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
-      "destinationAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
-      "amountPaise": "30000",
-      "status": "completed",
-      "transferType": "reversal",
-      "reversalReason": "Customer dispute resolved",
-      "createdAt": "2026-11-08T12:05:00.000Z"
-    },
-    "restoredBalances": {
-      "sourceAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
-      "sourceBalancePaise": "100000",
-      "destinationAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
-      "destinationBalancePaise": "50000"
-    }
-  }
-  ```
-* **Error Responses:**
-  * `400 Bad Request`: Missing `Idempotency-Key` header.
-  * `401 Unauthorized`: Missing, expired, or invalid Bearer token.
-  * `403 Forbidden`: Account holder does not own the debited destination account, or caller is an auditor.
-  * `404 Not Found`: Original transfer not found.
-  * `409 Conflict`: Transfer has already been reversed (enforced by partial unique index `idx_transfers_unique_reversal`).
-  * `422 Unprocessable Entity`: Debited account has insufficient funds to reverse the transfer.
-
-### 7. Cash Deposits (Phase 6 Stage 5.2)
-* **Endpoint:** `POST /api/transfers/deposit`
-* **Access:** Private (`account_holder`, `admin`)
-* **Headers:**
-  * `Authorization: Bearer <jwt-token>` (Mandatory)
-  * `Idempotency-Key: <unique-client-key>` (Mandatory)
-* **Authorization Policy:**
-  * `account_holder` may only deposit into an account they personally own.
-  * `admin` may deposit into any customer account.
-* **Payload:**
-  ```json
-  {
-    "accountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
-    "amountPaise": 50000
-  }
-  ```
-* **Success Response (201 Created):**
-  ```json
-  {
-    "message": "Deposit completed successfully",
-    "transfer": {
-      "id": "e4eebc99-9c0b-4ef8-bb6d-6bb9bd380a55",
-      "transferType": "deposit",
-      "sourceAccountId": "00000000-0000-0000-0000-000000000002",
-      "destinationAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
-      "amountPaise": "50000",
-      "status": "completed",
-      "createdByUserId": "f5eebc99-9c0b-4ef8-bb6d-6bb9bd380a66",
-      "createdAt": "2026-11-09T08:00:00.000Z"
-    },
-    "account": {
-      "id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
-      "balancePaise": "150000",
-      "accountEntrySequence": "1"
-    }
-  }
-  ```
-
-### 8. Cash Withdrawals (Phase 6 Stage 5.3)
-* **Endpoint:** `POST /api/transfers/withdraw`
-* **Access:** Private (`account_holder`, `admin`)
-* **Headers:**
-  * `Authorization: Bearer <jwt-token>` (Mandatory)
-  * `Idempotency-Key: <unique-client-key>` (Mandatory)
-* **Authorization Policy:**
-  * `account_holder` may only withdraw from an account they personally own.
-  * `admin` may withdraw from any customer account.
-* **Payload:**
-  ```json
-  {
-    "accountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
-    "amountPaise": 20000
-  }
-  ```
-* **Success Response (201 Created):**
-  ```json
-  {
-    "message": "Withdrawal completed successfully",
-    "transfer": {
-      "id": "a1eebc99-9c0b-4ef8-bb6d-6bb9bd380a77",
-      "transferType": "withdrawal",
-      "sourceAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
-      "destinationAccountId": "00000000-0000-0000-0000-000000000002",
-      "amountPaise": "20000",
-      "status": "completed",
-      "createdByUserId": "f5eebc99-9c0b-4ef8-bb6d-6bb9bd380a66",
-      "createdAt": "2026-11-09T08:15:00.000Z"
-    },
-    "account": {
-      "id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
-      "balancePaise": "130000",
-      "accountEntrySequence": "2"
-    }
-  }
-  ```
-
-### 9. Account Statements (Phase 6 Stage 5.4)
-* **Endpoint:** `GET /api/accounts/:id/statement`
-* **Access:** Private (`account_holder`, `admin`, `auditor`)
-* **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
-* **Query Parameters (Optional):**
-  * `from_date`: ISO 8601 timestamp filter.
-  * `to_date`: ISO 8601 timestamp filter (must be $\ge \text{from\_date}$).
-  * `limit`: Integer (1-100, default 50).
-  * `offset`: Non-negative integer (default 0).
-  * `include_refused`: Boolean or string `"true"`/`"false"` (default `false`).
-* **Success Response (200 OK):**
-  ```json
-  {
-    "account": {
-      "id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
-      "accountNumber": "ACC-1001",
-      "accountType": "customer",
-      "currentBalancePaise": "130000",
-      "phase6CutoverBalancePaise": "100000",
-      "phase6CutoverCapturedAt": "2026-11-09T07:50:00.000Z",
-      "nextEntrySequence": "3"
-    },
-    "statement": {
-      "entries": [
-        {
-          "id": "b2eebc99-9c0b-4ef8-bb6d-6bb9bd380a88",
-          "transferId": "e4eebc99-9c0b-4ef8-bb6d-6bb9bd380a55",
-          "transferType": "deposit",
-          "entryType": "credit",
-          "amountPaise": "50000",
-          "balanceAfterPaise": "150000",
-          "accountEntrySequence": "1",
-          "regime": "sequenced",
-          "createdAt": "2026-11-09T08:00:00.000Z",
-          "initiatedBy": {
-            "userId": "f5eebc99-9c0b-4ef8-bb6d-6bb9bd380a66",
-            "username": "customer_alice"
-          }
-        }
-      ],
-      "pagination": {
-        "totalEntries": 1,
-        "limit": 50,
-        "offset": 0,
-        "note": "Offset pagination applies over the dual-regime total ordering. In an active ledger, offset pagination across separate requests can shift if concurrent transactions append new entries."
-      }
-    }
-  }
-  ```
-
----
-
-## 🔒 Database Roles & Security Architecture
-
-### A. Database Roles (Least Privilege)
-LedgerLine uses a simplified, least-privilege two-role architecture (`database/provision_roles.sql`):
-
-1. **`ledgerline_owner` (Migration & Schema Owner):**
-   - Owns the `public` schema and all tables (`users`, `accounts`, `transfers`, `ledger_entries`, `idempotency_keys`, `audit_refused_attempts`, `schema_migrations`).
-   - Owns all `SECURITY DEFINER` administrative functions.
-   - Used exclusively to run migrations (`npm run migrate:backend`) and initial admin bootstrap (`npm run seed:admin`).
-   - Not used to handle normal application HTTP traffic.
-2. **`ledgerline_app` (Restricted Runtime Application Role):**
-   - Used by the Node.js Express server to handle application traffic.
-   - **No Table Ownership:** Cannot alter schemas or disable database triggers.
-   - **No Truncate Privileges:** Cannot truncate any financial tables.
-   - **Strict Append-Only Enforcement:** Granted only `SELECT, INSERT` on `transfers`, `ledger_entries`, and `audit_refused_attempts` (no UPDATE or DELETE privileges).
-   - **Column-Level Privileges on Accounts:** Granted `SELECT`, column-level `INSERT (account_number)`, and column-level `UPDATE (balance_paise, updated_at, opening_balance_captured_at, next_entry_sequence)`. Cannot directly alter account ownership (`user_id`).
-   - **Column-Level Privileges on Users:** Granted `SELECT`, column-level `INSERT (username, email, password_hash)`, and column-level `UPDATE (password_hash, updated_at)`. Cannot directly alter user roles (`role`) or active status (`is_active`).
-   - **Accounts Privileges & Trust Boundary:** The Express application coordinates balance updates and ledger entries within atomic transactions. Note that while the deferred database constraint trigger validates that ledger entries associated with transfer records are balanced, direct SQL balance updates are not blocked by an accounts-level trigger.
-   - Attempted UPDATE or DELETE operations on ledger entries are blocked both by permission grants and by database triggers (`LL007`). There are no session-level backdoors.
-
-### B. Application Identity & Access Roles (RBAC)
-LedgerLine defines three distinct application roles stored in `public.users(role)`:
-1. **`admin`:** Full administrative control. Can create unassigned customer accounts, assign account owners, update user roles, and activate/deactivate users via transactional `SECURITY DEFINER` functions. Can also initiate transfers and reversals across accounts. Protected against demoting or deactivating the last active administrator.
-2. **`account_holder`:** Standard banking client. Can list and inspect only their own assigned accounts. Can transfer funds only from accounts they personally own. Can initiate reversals only when they own the debited account. Unassigned or non-owned account operations are rejected with `403 Forbidden`.
-3. **`auditor`:** Compliance and audit officer. Strictly read-only access. Can list and inspect all accounts across the system, but is blocked from executing any mutating transfer, reversal, or account provisioning endpoint (`403 Forbidden`). (There is currently no user-inspection endpoint implemented).
-
----
-
-## 🧪 Automated Testing
-
-Automated tests are executed using **Jest** and **Supertest**:
-```powershell
-npm run test:backend
+# Preview frontend production build locally
+npm --prefix frontend run preview
 ```
 
-**Test Safety & Isolation:**
-- Tests run against an isolated test database (e.g. `ledgerline_test`) and never against the development database (`ledgerline_dev`).
-- Each test generates uniquely keyed account records (`TEST-SRC-...`, `CONC-SRC-...`, `DET-SRC-...`, `LEDGER-SRC-...`, `RBAC-...`).
-- The database contains no test cleanup bypasses. Real application requests connect through `ledgerline_app`. Privileged fixtures strictly use `ownerPool` (`ledgerline_owner`) for test setup.
+---
 
-**Test Suites (129 automated tests across 11 suites):**
-1. `tests/health.test.js` (3 tests): Health check endpoints and 404 routing.
-2. `tests/transfers.test.js` (7 tests): Mandatory idempotency key validation, balance updates, debit/credit ledger verification, insufficient funds rejection, and input validations.
-3. `tests/concurrency.test.js` (1 test): Live race condition test demonstrating overdraft prevention under concurrent requests.
-4. `tests/deterministic-concurrency.test.js` (1 test): Deterministic concurrency test verifying that two distinct PostgreSQL clients execute competing account-lock queries, the second query is submitted before the first transaction is released, and the second client subsequently observes the updated balance.
-5. `tests/ledger.test.js` (15 tests): Full double-entry balanced ledger verification, immutability triggers, opening balance zero-sum cutover, and compensating reversals.
-6. `tests/auth.test.js` (13 tests): Authentication foundation, bcrypt work factor 12 hashing, timing-attack prevention, JWT issuance and verification, dynamic database role reflection, and user deactivation enforcement.
-7. `tests/rbac.test.js` (26 tests): Account ownership isolation, IDOR prevention, auditor read-only restrictions, admin creation/assignment/role/status operations, last-active-admin protection, concurrent mutual demotion race protection, ownership immutability, and system equity protection.
-8. `tests/audit.test.js` (10 tests): Refusal-attempt audit service, action validation, nonexistent 404 account FK safety (`account_id = NULL`), anonymous 401 rejection, failure handling with `durableAudit: false`, rollback/client-release ordering, and immutability triggers.
-9. `tests/deposits.test.js` (15 tests): Cash deposits double-entry balancing against `SYSTEM_CASH_CLEARING`, BigInt precision, amount validation, RBAC ownership, idempotency replay/conflict, contiguous sequence allocation under concurrency, and failure handling.
-10. `tests/withdrawals.test.js` (16 tests): Cash withdrawals double-entry balancing, BigInt upper-bound validation (`PG_MAX_BIGINT`), non-negative balance enforcement, defense-in-depth conditional updates, deterministic locking, idempotency, and refusal auditing.
-11. `tests/statements.test.js` (22 tests): Dual-regime statement ordering (legacy unsequenced vs sequenced), cutover snapshot metadata, RBAC ownership isolation, refused attempts separation and 404 notice, ISO 8601 date range filtering/validation, offset pagination determinism, and zero-mutation database guarantees.
+## 🏛️ Frontend Client Architecture & Routes
+
+The client is a responsive Single Page Application (SPA) built with React 18, React Router DOM 7, and vanilla CSS. It implements eight distinct routes governed by [`ProtectedRoute`](file:///d:/LedgerLine/frontend/src/components/common/ProtectedRoute.jsx):
+
+```text
+/                       -> HomePage (renders DashboardPage if authenticated; welcome page if guest)
+/login                  -> LoginPage (email/password authentication with error alerts)
+/register               -> RegisterPage (account creation enforcing password complexity)
+/dashboard              -> DashboardPage (customer accounts, balance overview, empty states)
+/transfers              -> TransfersPage (customer transfers, cash deposits, cash withdrawals)
+/statements             -> StatementsPage (statement explorer, filters, totals, pagination, print view)
+/admin                  -> AdminPortalPage (account creation, ownership assignment, role/status governance)
+/auditor                -> AuditorPortalPage (read-only ledger overview, account registry, direct statement links)
+*                       -> NotFoundPage (404 catch-all)
+```
+
+### Key Client Features:
+1. **Centralized API Client ([`frontend/src/api/client.js`](file:///d:/LedgerLine/frontend/src/api/client.js)):** Automatically attaches Bearer tokens, intercepts 401s to clear session state, and classifies errors into *Definitive Business Errors* (400, 401, 403, 404, 422, 409 Conflict) and *Ambiguous Network Outcomes* (HTTP 0, 502–504, 409 ConcurrentRequestError).
+2. **In-Memory & Tab-Scoped Session Storage:** Tokens are held in React state with an optional fallback to `sessionStorage` (`ledgerline_session_token`) to survive page reloads within the tab. Persistent `localStorage` is intentionally avoided.
+3. **Idempotency Lifecycle & Pending Banner:** When a financial mutation experiences an ambiguous network failure, the client preserves the exact `idempotencyKey` and payload in `sessionStorage` and surfaces [`PendingOperationBanner`](file:///d:/LedgerLine/frontend/src/components/transfers/PendingOperationBanner.jsx). Retrying re-sends the identical key, preventing double-execution.
+4. **Timezone-Explicit Statement Filtering:** Statements support explicit UTC bounding (`00:00:00.000Z` to `23:59:59.999Z`) or browser LOCAL timezone bounding with exact ISO offset conversion in [`frontend/src/utils/date.js`](file:///d:/LedgerLine/frontend/src/utils/date.js).
 
 ---
 
-## 🗺️ Roadmap
+## 📡 Implemented API Endpoints (Specifications & Contracts)
+
+### 1. Health & Status
+* **`GET /api/health`**
+  * **Access:** Public
+  * **Description:** Basic server responsiveness probe. Returns service name, environment, and process uptime.
+  * **Database Probe:** If `?db=true` is appended, executes `SELECT NOW() AS current_time, current_database() AS database` to verify database TCP connectivity. Does **not** perform schema or invariant validation.
+  * **Response (200 OK):**
+    ```json
+    {
+      "status": "healthy",
+      "service": "LedgerLine API",
+      "environment": "development",
+      "uptime": "12.4s",
+      "timestamp": "2026-11-09T08:00:00.000Z",
+      "database": {
+        "status": "connected",
+        "details": { "database": "ledgerline_dev" }
+      }
+    }
+    ```
+  * **Error Response (503 Service Unavailable):** Returned when `?db=true` is queried and the database connection fails:
+    ```json
+    {
+      "status": "degraded",
+      "service": "LedgerLine API",
+      "environment": "development",
+      "uptime": "12.5s",
+      "timestamp": "2026-11-09T08:00:01.000Z",
+      "database": {
+        "status": "disconnected",
+        "details": { "error": "connect ECONNREFUSED 127.0.0.1:5432" }
+      }
+    }
+    ```
+
+### 2. User Authentication
+* **`POST /api/auth/register`**
+  * **Access:** Public
+  * **Rules:** Enforces minimum 8 characters, at least 1 letter, and at least 1 number. Ignores or rejects role escalation attempts; defaults strictly to `account_holder`. Passwords hashed with `bcryptjs` (work factor 12).
+  * **Request Body:**
+    ```json
+    {
+      "username": "alice",
+      "email": "alice@example.com",
+      "password": "SecurePassword123"
+    }
+    ```
+  * **Success Response (201 Created):**
+    ```json
+    {
+      "message": "User registered successfully",
+      "user": {
+        "id": "e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a01",
+        "username": "alice",
+        "email": "alice@example.com",
+        "role": "account_holder",
+        "isActive": true,
+        "createdAt": "2026-11-09T08:05:00.000Z"
+      }
+    }
+    ```
+  * **Error Responses:**
+    * `400 Bad Request`: Payload validation error (password failing complexity, invalid email).
+    * `409 Conflict`: Username or email already registered.
+* **`POST /api/auth/login`**
+  * **Access:** Public
+  * **Security:** Employs `dummyVerifyPassword` against a precomputed work-factor-12 hash for unknown emails to reduce timing discrepancy and mitigate user enumeration. Returns Bearer JWT with `sub: user.id`.
+  * **Request Body:**
+    ```json
+    {
+      "email": "alice@example.com",
+      "password": "SecurePassword123"
+    }
+    ```
+  * **Success Response (200 OK):**
+    ```json
+    {
+      "message": "Login successful",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+      "user": {
+        "id": "e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a01",
+        "username": "alice",
+        "email": "alice@example.com",
+        "role": "account_holder",
+        "isActive": true
+      }
+    }
+    ```
+  * **Error Responses:**
+    * `400 Bad Request`: Missing email or password.
+    * `401 Unauthorized`: Invalid credentials (safe, generic error message).
+* **`GET /api/auth/me`**
+  * **Access:** Private (`account_holder`, `admin`, `auditor`)
+  * **Headers:** `Authorization: Bearer <jwt-token>` (Mandatory)
+  * **Description:** Queries live user attributes from `public.users`. Immediately reflects database role demotion or deactivation.
+  * **Error Responses:**
+    * `401 Unauthorized`: Token missing, expired, or user deleted from database.
+    * `403 Forbidden`: User account deactivated (`is_active = false`).
+
+### 3. Account Inspection & Creation
+* **`GET /api/accounts`**
+  * **Access:** Private (`account_holder`, `admin`, `auditor`)
+  * **Policy:** Account holders see only their assigned accounts (`user_id = req.user.id`). Admins and auditors see all accounts. System accounts are omitted by default unless `include_system=true` is passed by an admin or auditor.
+  * **Success Response (200 OK):**
+    ```json
+    {
+      "accounts": [
+        {
+          "id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+          "account_number": "ACC-CUSTOMER-1001",
+          "balance_paise": "100000",
+          "account_type": "customer",
+          "user_id": "e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a01",
+          "created_at": "2026-11-09T08:10:00.000Z"
+        }
+      ]
+    }
+    ```
+* **`GET /api/accounts/:id`**
+  * **Access:** Private (`account_holder`, `admin`, `auditor`)
+  * **Policy:** Account holders can only inspect accounts they own.
+  * **Error Responses:**
+    * `400 Bad Request`: Malformed UUID parameter.
+    * `403 Forbidden`: Account not owned by requesting account holder.
+    * `404 Not Found`: Account does not exist.
+* **`POST /api/accounts`**
+  * **Access:** Private (`admin` only)
+  * **Request Body:**
+    ```json
+    {
+      "accountNumber": "ACC-CUSTOMER-1002"
+    }
+    ```
+  * **Success Response (201 Created):**
+    ```json
+    {
+      "message": "Account created successfully",
+      "account": {
+        "id": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
+        "account_number": "ACC-CUSTOMER-1002",
+        "balance_paise": "0",
+        "account_type": "customer",
+        "user_id": null
+      }
+    }
+    ```
+  * **Error Responses:**
+    * `400 Bad Request`: Invalid or missing `accountNumber`.
+    * `403 Forbidden`: Non-admin caller.
+    * `409 Conflict`: Account number already exists.
+
+### 4. Administrative Operations
+All administrative endpoints require `admin` role and delegate invariant enforcement to transactional PostgreSQL `SECURITY DEFINER` functions:
+* **`PATCH /api/admin/users/:id/role`**
+  * **Access:** Private (`admin` only)
+  * **Request Body:** `{ "role": "auditor" }`
+  * **Success Response (200 OK):**
+    ```json
+    {
+      "message": "User role updated successfully",
+      "user": {
+        "id": "e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a01",
+        "role": "auditor"
+      }
+    }
+    ```
+  * **Error Responses:**
+    * `400 Bad Request`: Invalid role value or malformed user UUID.
+    * `404 Not Found`: User does not exist.
+    * `422 Unprocessable Entity`: Demoting the last active administrator rejected (`LL007`).
+* **`PATCH /api/admin/users/:id/status`**
+  * **Access:** Private (`admin` only)
+  * **Request Body:** `{ "isActive": false }`
+  * **Success Response (200 OK):**
+    ```json
+    {
+      "message": "User status updated successfully",
+      "user": {
+        "id": "e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a01",
+        "isActive": false
+      }
+    }
+    ```
+  * **Error Responses:**
+    * `400 Bad Request`: Missing or non-boolean `isActive`.
+    * `404 Not Found`: User does not exist.
+    * `422 Unprocessable Entity`: Deactivating the last active administrator rejected (`LL007`).
+* **`POST /api/admin/accounts/:id/owner`**
+  * **Access:** Private (`admin` only)
+  * **Request Body:** `{ "userId": "e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a01" }`
+  * **Success Response (200 OK):**
+    ```json
+    {
+      "message": "Account owner assigned successfully",
+      "account": {
+        "id": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
+        "userId": "e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a01"
+      }
+    }
+    ```
+  * **Error Responses:**
+    * `400 Bad Request`: Malformed UUID parameter.
+    * `404 Not Found`: Target user or account does not exist.
+    * `422 Unprocessable Entity`: Account already owned (immutable ownership violation `LL007`), target user inactive, or target is a system equity/clearing account.
+
+### 5. Money Transfers & Reversals
+* **`POST /api/transfers`**
+  * **Access:** Private (`account_holder`, `admin`)
+  * **Headers:**
+    * `Authorization: Bearer <jwt-token>` (Mandatory)
+    * `Idempotency-Key: <unique-key>` (Mandatory; scoped per `account:<sourceAccountId>`)
+  * **Request Body:**
+    ```json
+    {
+      "sourceAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+      "destinationAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
+      "amountPaise": 50000
+    }
+    ```
+  * **Success Response (201 Created):**
+    ```json
+    {
+      "message": "Transfer completed successfully",
+      "transfer": {
+        "id": "c2eebc99-9c0b-4ef8-bb6d-6bb9bd380a33",
+        "sourceAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+        "destinationAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
+        "amountPaise": "50000",
+        "status": "completed",
+        "transferType": "customer_transfer",
+        "createdAt": "2026-11-09T08:20:00.000Z"
+      },
+      "updatedBalances": {
+        "sourceAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+        "sourceBalancePaise": "50000",
+        "destinationAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
+        "destinationBalancePaise": "50000"
+      }
+    }
+    ```
+  * **Idempotent Replay (201 Created):** Returns identical response body with response header `Idempotent-Replayed: true`.
+  * **Error Responses:**
+    * `400 Bad Request`: Missing `Idempotency-Key` header, negative amount, or identical source/destination.
+    * `401 Unauthorized`: Token missing or invalid.
+    * `403 Forbidden`: Account holder does not own source account; or caller is an auditor.
+    * `404 Not Found`: Source or destination account not found.
+    * `409 Conflict`: Re-sending same key with different payload parameters (`IdempotencyConflictError`).
+    * `422 Unprocessable Entity`: Sender has insufficient balance. Uncommitted idempotency reservation is released, allowing retry once funded.
+* **`POST /api/transfers/:id/reversal`**
+  * **Access:** Private (`account_holder`, `admin`)
+  * **Headers:**
+    * `Authorization: Bearer <jwt-token>` (Mandatory)
+    * `Idempotency-Key: <unique-key>` (Mandatory; scoped per `reversal:<originalTransferId>`)
+  * **Request Body:** `{ "reversalReason": "Disputed transaction" }`
+  * **Success Response (201 Created):**
+    ```json
+    {
+      "message": "Transfer reversed successfully",
+      "reversal": {
+        "id": "d3eebc99-9c0b-4ef8-bb6d-6bb9bd380a44",
+        "originalTransferId": "c2eebc99-9c0b-4ef8-bb6d-6bb9bd380a33",
+        "sourceAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
+        "destinationAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+        "amountPaise": "50000",
+        "status": "completed",
+        "transferType": "reversal",
+        "reversalReason": "Disputed transaction",
+        "createdAt": "2026-11-09T08:25:00.000Z"
+      },
+      "restoredBalances": {
+        "sourceAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+        "sourceBalancePaise": "100000",
+        "destinationAccountId": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
+        "destinationBalancePaise": "0"
+      }
+    }
+    ```
+  * **Error Responses:**
+    * `400 Bad Request`: Missing `Idempotency-Key` header.
+    * `403 Forbidden`: Account holder does not own the debited (destination) account; or caller is an auditor.
+    * `404 Not Found`: Original transfer not found.
+    * `409 Conflict`: Transfer has already been reversed (enforced by partial unique index `idx_transfers_unique_reversal`).
+    * `422 Unprocessable Entity`: Debited account has insufficient balance to reverse the transfer.
+
+### 6. Cash Operations (Deposits & Withdrawals)
+* **`POST /api/transfers/deposit`**
+  * **Access:** Private (`account_holder`, `admin`)
+  * **Headers:**
+    * `Authorization: Bearer <jwt-token>` (Mandatory)
+    * `Idempotency-Key: <unique-key>` (Mandatory; scoped per `deposit:<accountId>`)
+  * **Request Body:** `{ "accountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", "amountPaise": 50000 }`
+  * **Success Response (201 Created):**
+    ```json
+    {
+      "message": "Deposit completed successfully",
+      "transfer": {
+        "id": "e4eebc99-9c0b-4ef8-bb6d-6bb9bd380a55",
+        "transferType": "deposit",
+        "sourceAccountId": "00000000-0000-0000-0000-000000000002",
+        "destinationAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+        "amountPaise": "50000",
+        "status": "completed",
+        "createdByUserId": "e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a01",
+        "createdAt": "2026-11-09T08:30:00.000Z"
+      },
+      "account": {
+        "id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+        "balancePaise": "150000",
+        "accountEntrySequence": "1"
+      }
+    }
+    ```
+  * **Error Responses:**
+    * `400 Bad Request`: Invalid amount or missing idempotency key.
+    * `403 Forbidden`: Account holder does not own target account; or caller is an auditor.
+    * `404 Not Found`: Account does not exist.
+    * `409 Conflict`: Re-sending same key with different payload.
+* **`POST /api/transfers/withdraw`**
+  * **Access:** Private (`account_holder`, `admin`)
+  * **Headers:**
+    * `Authorization: Bearer <jwt-token>` (Mandatory)
+    * `Idempotency-Key: <unique-key>` (Mandatory; scoped per `withdraw:<accountId>`)
+  * **Request Body:** `{ "accountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", "amountPaise": 20000 }`
+  * **Success Response (201 Created):**
+    ```json
+    {
+      "message": "Withdrawal completed successfully",
+      "transfer": {
+        "id": "a1eebc99-9c0b-4ef8-bb6d-6bb9bd380a77",
+        "transferType": "withdrawal",
+        "sourceAccountId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+        "destinationAccountId": "00000000-0000-0000-0000-000000000002",
+        "amountPaise": "20000",
+        "status": "completed",
+        "createdByUserId": "e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a01",
+        "createdAt": "2026-11-09T08:35:00.000Z"
+      },
+      "account": {
+        "id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+        "balancePaise": "130000",
+        "accountEntrySequence": "2"
+      }
+    }
+    ```
+  * **Error Responses:**
+    * `400 Bad Request`: Invalid amount, amount exceeding `PG_MAX_BIGINT`, or missing idempotency key.
+    * `403 Forbidden`: Account holder does not own source account; or caller is an auditor.
+    * `404 Not Found`: Account not found.
+    * `409 Conflict`: Re-sending same key with different payload.
+    * `422 Unprocessable Entity`: Insufficient balance. Triggers refusal audit log insertion.
+
+### 7. Account Statements
+* **`GET /api/accounts/:id/statement`**
+  * **Access:** Private (`account_holder`, `admin`, `auditor`)
+  * **Query Parameters (Optional):**
+    * `from_date`: ISO 8601 string (e.g. `2026-01-01T00:00:00.000Z`).
+    * `to_date`: ISO 8601 string (e.g. `2026-01-31T23:59:59.999Z`).
+    * `limit`: Integer (1–100, default 50).
+    * `offset`: Non-negative integer (default 0).
+    * `include_refused`: Boolean or string `"true"`/`"false"` (default `false`).
+  * **Success Response (200 OK):**
+    ```json
+    {
+      "account": {
+        "id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+        "accountNumber": "ACC-CUSTOMER-1001",
+        "accountType": "customer",
+        "currentBalancePaise": "130000",
+        "phase6CutoverBalancePaise": "100000",
+        "phase6CutoverCapturedAt": "2026-11-09T07:50:00.000Z",
+        "nextEntrySequence": "3"
+      },
+      "statement": {
+        "entries": [
+          {
+            "id": "b2eebc99-9c0b-4ef8-bb6d-6bb9bd380a88",
+            "transferId": "e4eebc99-9c0b-4ef8-bb6d-6bb9bd380a55",
+            "transferType": "deposit",
+            "entryType": "credit",
+            "amountPaise": "50000",
+            "balanceAfterPaise": "150000",
+            "accountEntrySequence": "1",
+            "regime": "sequenced",
+            "createdAt": "2026-11-09T08:30:00.000Z",
+            "initiatedBy": {
+              "userId": "e0eebc99-9c0b-4ef8-bb6d-6bb9bd380a01",
+              "username": "alice"
+            }
+          }
+        ],
+        "pagination": {
+          "totalEntries": 1,
+          "limit": 50,
+          "offset": 0,
+          "note": "Offset pagination applies over the dual-regime total ordering. In an active ledger, offset pagination across separate requests can shift if concurrent transactions append new entries."
+        }
+      }
+    }
+    ```
+  * **Error Responses:**
+    * `400 Bad Request`: Malformed UUID or invalid date range (`from_date > to_date`).
+    * `403 Forbidden`: Account holder does not own account.
+    * `404 Not Found`: Account does not exist.
+
+---
+
+## 🔐 Role Permission Matrix
+
+| Capability / Endpoint | `account_holder` | `admin` | `auditor` |
+| :--- | :---: | :---: | :---: |
+| View Own Assigned Accounts (`GET /api/accounts`) | ✅ | ✅ | ✅ |
+| View Other / Unassigned Accounts | ❌ (403) | ✅ | ✅ |
+| View System Accounts (`?include_system=true`) | ❌ (Filtered) | ✅ | ✅ |
+| Create Customer Accounts (`POST /api/accounts`) | ❌ (403) | ✅ | ❌ (403) |
+| Assign Account Ownership (`POST /api/admin/accounts/:id/owner`) | ❌ (403) | ✅ | ❌ (403) |
+| Change User Roles & Status (`PATCH /api/admin/users/:id/*`) | ❌ (403) | ✅ | ❌ (403) |
+| Initiate Transfers (`POST /api/transfers`) | ✅ (Own source only) | ✅ | ❌ (403) |
+| Reverse Transfers (`POST /api/transfers/:id/reversal`) | ✅ (Own debited only) | ✅ | ❌ (403) |
+| Deposit Cash (`POST /api/transfers/deposit`) | ✅ (Own account only) | ✅ | ❌ (403) |
+| Withdraw Cash (`POST /api/transfers/withdraw`) | ✅ (Own account only) | ✅ | ❌ (403) |
+| View Account Statements (`GET /api/accounts/:id/statement`) | ✅ (Own account only) | ✅ | ✅ |
+
+---
+
+## 🛡️ Financial Integrity & Security Design
+
+### 1. Exact Integer Arithmetic
+- All monetary amounts are handled strictly as integer paise ($1\text{ Rupee} = 100\text{ paise}$) represented as `BIGINT` in PostgreSQL and native `BigInt` in Node.js and React.
+- IEEE 754 floating-point numbers (`Number` / `float`) are prohibited in financial pathways, eliminating rounding arbitrage.
+- Currency parsing and formatting in [`frontend/src/utils/currency.js`](file:///d:/LedgerLine/frontend/src/utils/currency.js) operates exclusively via string splitting and BigInt arithmetic, with bounds enforcement against `PG_MAX_BIGINT` ($9{,}223{,}372{,}036{,}854{,}775{,}807$).
+
+### 2. Append-Only Immutability & Double-Entry Balancing
+- Every financial mutation (transfer, deposit, withdrawal, reversal, opening cutover) produces **exactly two** balanced ledger entries: one debit and one credit of equal amount.
+- **Immutability Triggers:** Database triggers `prevent_ledger_mutation` and `prevent_transfer_mutation` unconditionally abort all `UPDATE` and `DELETE` statements with SQLSTATE `LL007`. There are no backdoor bypass settings.
+- **Deferred Constraint Triggers:** `trg_verify_transfer_balance` is declared `DEFERRABLE INITIALLY DEFERRED`. At `COMMIT`, PostgreSQL verifies that each transfer record is balanced by its corresponding debit and credit ledger entries.
+
+### 3. Concurrency Protection & Deadlock Mitigation
+- Competing transfer and withdrawal transactions lock participating accounts using:
+  ```sql
+  SELECT id, balance_paise FROM accounts WHERE id IN ($1, $2) ORDER BY id ASC FOR UPDATE
+  ```
+- Deterministic lock acquisition ordering (`ORDER BY id ASC`) eliminates circular lock waits between concurrent transfers swapping identical account pairs, significantly reducing deadlock risk.
+- Conditional balance deductions (`WHERE id = $1 AND balance_paise >= $2`) provide defense-in-depth against overdrafts.
+
+### 4. Idempotency & Duplicate Request Protection
+- Mutating endpoints require an `Idempotency-Key` HTTP header.
+- Scoped keys (`account:<sourceAccountId>`, `deposit:<accountId>`, `withdraw:<accountId>`, `reversal:<originalTransferId>`) prevent cross-account collisions.
+- The backend stores a SHA-256 hash of canonical business parameters. Replaying identical parameters for the same key and scope returns the cached response with `Idempotent-Replayed: true`. Replaying the same key with altered parameters returns HTTP `409 Conflict`.
+- Solvency rejections (HTTP 422) roll back the uncommitted key reservation, allowing the client to retry once funded.
+
+### 5. Audit Logging of Refused Attempts
+- Refused attempts due to business failures (such as insufficient funds or nonexistent accounts) are persisted to `public.audit_refused_attempts`.
+- **Rollback-Release-Audit Ordering:** The financial transaction is explicitly rolled back and its database client released to the pool *before* the refusal audit record is inserted on an independent connection.
+- Nonexistent account attempts preserve the attempted UUID in `reason_message` while setting `account_id = NULL` to prevent foreign-key violations.
+- If audit insertion fails, the endpoint returns HTTP 500 with `durableAudit: false` and emits structured critical `stderr` logs.
+
+---
+
+## ⚠️ Known Limitations & Operational Boundaries
+
+1. **Deployment Status:** LedgerLine is currently pending deployment. All tests pass locally against `ledgerline_test`, but external production hosting, DNS, and TLS certificates have not yet been provisioned.
+2. **Real Bank Rails:** LedgerLine does not integrate with real-world payment networks (UPI, IMPS, NEFT, RTGS, SWIFT, ACH). It operates as an isolated core ledger engine.
+3. **Cash Clearing Accounting:** `SYSTEM_CASH_CLEARING` is strictly an internal zero-sum accounting counter-account. It is not legal proof of physical currency, cash vaults, or central bank reserves.
+4. **Historical Sequence Gaps & Ordering:** Ledger entries created prior to Phase 6 maintain `account_entry_sequence = NULL`. In statements, legacy entries are displayed chronologically using `created_at ASC, id ASC` (with entry ID serving as a deterministic tie-breaker for identical timestamps), but they do not possess authoritative Phase 6 contiguous per-account sequence numbers.
+5. **Statement Offset Pagination:** Statements use SQL `LIMIT / OFFSET` over a total-ordered result set. In an active banking environment, concurrent transactions committed between page requests may cause entries to shift across page boundaries.
+6. **Nonexistent Account Refusals:** Refused attempts targeting a nonexistent account UUID have `account_id = NULL` in the database and cannot appear on any specific account statement.
+7. **Security Boundary Distinction:** Express JWT middleware (`authenticateJWT` and `requireRole`) is the sole authentication and authorization boundary for HTTP users. PostgreSQL `SECURITY DEFINER` functions enforce internal database invariants, but do not independently authenticate HTTP requests.
+8. **Client Session Storage:** The React frontend stores authentication tokens in-memory with a tab-scoped fallback in `sessionStorage` (`ledgerline_session_token`) to survive page reloads. Same-origin scripts within the tab lifecycle can access `sessionStorage`; persistent `localStorage` is intentionally avoided.
+
+---
+
+## 🧪 Verification & Test Metrics
+
+- **Backend Automated Tests:** **129 passed, 129 total** across 11 Jest suites (`npm run test:backend`).
+- **Frontend Automated Tests:** **115 passed, 115 total** across 10 Vitest suites (`npm --prefix frontend test -- --run`).
+- **Combined Project Test Suite:** **244 passed, 244 total (0 failures)**.
+- **Frontend Production Build:** **Compiled cleanly** (73 modules transformed, 0 errors, 0 build warnings).
+
+---
+
+## 🗺️ Roadmap & Phase Completion
+
 - [x] **Phase 1: Initial Foundation & Workspace Setup**
 - [x] **Phase 2 Baseline: Initial Migration & Basic Money Transfer (Experiment 1)**
 - [x] **Phase 2 Hardening & Phase 3: Concurrency Protection (`SELECT ... FOR UPDATE`), Row-Level Serialization & Regression Proof**
 - [x] **Phase 4: Full Double-Entry Balanced Ledger Engine, Append-Only Triggers, Idempotency & Reversals**
 - [x] **Phase 5: User Authentication & Role-Based Authorization**
 - [x] **Phase 6: Banking Functionality, Cash Invariants, Refusal Auditing & Account Statements**
+- [x] **Phase 7: Frontend Banking Client Application, Vitest Suite & Readiness Audit**
