@@ -1,182 +1,236 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
+import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { Navbar } from './components/layout/Navbar';
+import { ProtectedRoute } from './components/common/ProtectedRoute';
+import { LoginPage } from './pages/LoginPage';
+import { RegisterPage } from './pages/RegisterPage';
+import { DashboardPage } from './pages/DashboardPage';
+import { TransfersPage } from './pages/TransfersPage';
+import { StatementsPage } from './pages/StatementsPage';
+import { AdminPortalPage } from './pages/AdminPortalPage';
+import { AuditorPortalPage } from './pages/AuditorPortalPage';
 
-export default function App() {
-  const [healthData, setHealthData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+function HomePage() {
+  const { user, isAuthenticated, role } = useAuth();
 
-  const fetchHealth = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await fetch('/api/health');
-      if (!response.ok) {
-        throw new Error(`Server responded with status ${response.status}`);
-      }
-      const data = await response.json();
-      setHealthData(data);
-    } catch (err) {
-      setError(err.message || 'Unable to reach backend server');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchHealth();
-  }, []);
+  if (isAuthenticated) {
+    return <DashboardPage />;
+  }
 
   return (
-    <div style={{ maxWidth: '960px', margin: '0 auto', padding: '2rem 1.5rem', width: '100%' }}>
-      {/* Header */}
-      <header style={{ marginBottom: '2.5rem', borderBottom: '1px solid #e2e8f0', paddingBottom: '1.5rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.5rem' }}>
-          <span style={{ fontSize: '2rem' }}>⚖️</span>
-          <h1 style={{ fontSize: '1.875rem', fontWeight: '700', letterSpacing: '-0.025em' }}>
-            LedgerLine
-          </h1>
-          <span style={{
-            fontSize: '0.75rem',
-            backgroundColor: '#0284c7',
-            color: '#ffffff',
-            padding: '0.2rem 0.6rem',
-            borderRadius: '9999px',
-            fontWeight: '600'
-          }}>
-            Foundation Phase
-          </span>
+    <div style={{ maxWidth: '960px', margin: '2rem auto', padding: '0 1rem' }}>
+      <div style={{
+        backgroundColor: '#ffffff',
+        borderRadius: '0.75rem',
+        padding: '2rem',
+        border: '1px solid #e2e8f0',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1rem' }}>
+          <span style={{ fontSize: '2.5rem' }}>⚖️</span>
+          <div>
+            <h1 style={{ fontSize: '1.75rem', fontWeight: '700', color: '#0f172a' }}>
+              LedgerLine Banking Platform
+            </h1>
+            <p style={{ color: '#64748b', fontSize: '0.95rem' }}>
+              Phase 7 Frontend Foundation: Double-Entry Ledger, Cash Invariants & Audit Trail
+            </p>
+          </div>
         </div>
-        <p style={{ color: '#64748b', fontSize: '1rem' }}>
-          Robust, Double-Entry Financial Ledger Application
-        </p>
-      </header>
 
-      {/* Main Grid */}
-      <main style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '1.5rem' }}>
-        
-        {/* API Health Card */}
-        <section style={{
-          backgroundColor: '#ffffff',
-          borderRadius: '0.75rem',
-          padding: '1.5rem',
-          boxShadow: '0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06)',
-          border: '1px solid #e2e8f0'
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-            <h2 style={{ fontSize: '1.125rem', fontWeight: '600' }}>Backend Health Status</h2>
-            <button
-              onClick={fetchHealth}
-              disabled={loading}
-              style={{
-                backgroundColor: '#f1f5f9',
-                border: '1px solid #cbd5e1',
-                padding: '0.35rem 0.75rem',
-                borderRadius: '0.375rem',
-                cursor: loading ? 'not-allowed' : 'pointer',
-                fontSize: '0.875rem',
-                fontWeight: '500'
-              }}
-            >
-              {loading ? 'Checking...' : 'Refresh'}
-            </button>
-          </div>
-
-          {loading && (
-            <p style={{ color: '#64748b', fontSize: '0.9rem' }}>Pinging backend API at /api/health...</p>
-          )}
-
-          {error && (
-            <div style={{
-              backgroundColor: '#fef2f2',
-              color: '#991b1b',
-              padding: '0.75rem 1rem',
-              borderRadius: '0.5rem',
-              fontSize: '0.875rem',
-              border: '1px solid #fecaca'
-            }}>
-              <strong>Backend Offline:</strong> {error}
-              <p style={{ marginTop: '0.5rem', fontSize: '0.8rem', color: '#b91c1c' }}>
-                Make sure the backend is running with <code>npm run dev:backend</code>.
-              </p>
-            </div>
-          )}
-
-          {healthData && !loading && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <span style={{
-                  display: 'inline-block',
-                  width: '10px',
-                  height: '10px',
-                  borderRadius: '50%',
-                  backgroundColor: '#16a34a'
-                }} />
-                <span style={{ fontWeight: '600', color: '#16a34a' }}>
-                  {healthData.status.toUpperCase()}
-                </span>
-                <span style={{ color: '#64748b', fontSize: '0.85rem' }}>({healthData.service})</span>
+        {isAuthenticated ? (
+          <div style={{
+            marginTop: '1.5rem',
+            padding: '1.25rem',
+            backgroundColor: '#f8fafc',
+            borderRadius: '0.5rem',
+            border: '1px solid #e2e8f0',
+          }}>
+            <h2 style={{ fontSize: '1.1rem', fontWeight: '600', marginBottom: '0.75rem', color: '#1e293b' }}>
+              Active Session Details
+            </h2>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
+              <div>
+                <span style={{ fontSize: '0.8rem', color: '#64748b', textTransform: 'uppercase' }}>Username</span>
+                <p style={{ fontWeight: '600', color: '#0f172a' }}>{user?.username}</p>
               </div>
-              <div style={{ fontSize: '0.85rem', color: '#475569' }}>
-                <div><strong>Environment:</strong> {healthData.environment}</div>
-                <div><strong>Uptime:</strong> {healthData.uptime}</div>
-                <div><strong>Server Time:</strong> {new Date(healthData.timestamp).toLocaleTimeString()}</div>
-                <div><strong>Database Pool:</strong> {healthData.database.status}</div>
+              <div>
+                <span style={{ fontSize: '0.8rem', color: '#64748b', textTransform: 'uppercase' }}>Email</span>
+                <p style={{ fontWeight: '600', color: '#0f172a' }}>{user?.email}</p>
+              </div>
+              <div>
+                <span style={{ fontSize: '0.8rem', color: '#64748b', textTransform: 'uppercase' }}>Role</span>
+                <p style={{ fontWeight: '600', color: '#0284c7', textTransform: 'capitalize' }}>
+                  {role ? role.replace('_', ' ') : ''}
+                </p>
+              </div>
+              <div>
+                <span style={{ fontSize: '0.8rem', color: '#64748b', textTransform: 'uppercase' }}>Status</span>
+                <p style={{ fontWeight: '600', color: user?.is_active ? '#16a34a' : '#dc2626' }}>
+                  {user?.is_active ? 'Active' : 'Deactivated'}
+                </p>
               </div>
             </div>
-          )}
-        </section>
-
-        {/* Tech Stack Summary */}
-        <section style={{
-          backgroundColor: '#ffffff',
-          borderRadius: '0.75rem',
-          padding: '1.5rem',
-          boxShadow: '0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06)',
-          border: '1px solid #e2e8f0'
-        }}>
-          <h2 style={{ fontSize: '1.125rem', fontWeight: '600', marginBottom: '1rem' }}>Technology Stack</h2>
-          <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '0.5rem', fontSize: '0.875rem' }}>
-            <li>⚡ <strong>Frontend:</strong> React 18 + Vite</li>
-            <li>🚀 <strong>Backend:</strong> Node.js + Express</li>
-            <li>🐘 <strong>Database:</strong> PostgreSQL (port 5432)</li>
-            <li>🔌 <strong>DB Client:</strong> node-postgres (pg.Pool)</li>
-            <li>🛡️ <strong>Validation:</strong> Zod schema validation</li>
-            <li>🧪 <strong>Testing:</strong> Jest + Supertest</li>
-            <li>🔐 <strong>Auth Ready:</strong> JWT + bcrypt</li>
-          </ul>
-        </section>
-
-        {/* Setup Guardrails */}
-        <section style={{
-          backgroundColor: '#ffffff',
-          borderRadius: '0.75rem',
-          padding: '1.5rem',
-          boxShadow: '0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06)',
-          border: '1px solid #e2e8f0',
-          gridColumn: '1 / -1'
-        }}>
-          <h2 style={{ fontSize: '1.125rem', fontWeight: '600', marginBottom: '0.75rem' }}>Project Foundation Status</h2>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
-            <div style={{ padding: '0.75rem', backgroundColor: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '0.5rem' }}>
-              <div style={{ color: '#166534', fontWeight: '600', fontSize: '0.875rem' }}>✓ Environment Variables</div>
-              <div style={{ fontSize: '0.8rem', color: '#15803d', marginTop: '0.25rem' }}>Configured via .env.example with no secrets leaked</div>
-            </div>
-            <div style={{ padding: '0.75rem', backgroundColor: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '0.5rem' }}>
-              <div style={{ color: '#166534', fontWeight: '600', fontSize: '0.875rem' }}>✓ PostgreSQL Config</div>
-              <div style={{ fontSize: '0.8rem', color: '#15803d', marginTop: '0.25rem' }}>Targeting ledgerline_dev on port 5432</div>
-            </div>
-            <div style={{ padding: '0.75rem', backgroundColor: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '0.5rem' }}>
-              <div style={{ color: '#166534', fontWeight: '600', fontSize: '0.875rem' }}>✓ Health Check & Tests</div>
-              <div style={{ fontSize: '0.8rem', color: '#15803d', marginTop: '0.25rem' }}>GET /api/health tested with Jest & Supertest</div>
-            </div>
-            <div style={{ padding: '0.75rem', backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '0.5rem' }}>
-              <div style={{ color: '#1e40af', fontWeight: '600', fontSize: '0.875rem' }}>⏳ Next Phase: Database Schema</div>
-              <div style={{ fontSize: '0.8rem', color: '#1d4ed8', marginTop: '0.25rem' }}>Awaiting user approval before schema migration</div>
+          </div>
+        ) : (
+          <div style={{ marginTop: '1.5rem' }}>
+            <p style={{ color: '#475569', marginBottom: '1rem', fontSize: '0.95rem' }}>
+              Sign in with your registered account credentials to access your banking dashboard, accounts, and financial transfers.
+            </p>
+            <div style={{ display: 'flex', gap: '0.75rem' }}>
+              <Link
+                to="/login"
+                style={{
+                  backgroundColor: '#0284c7',
+                  color: '#ffffff',
+                  padding: '0.5rem 1.25rem',
+                  borderRadius: '0.375rem',
+                  textDecoration: 'none',
+                  fontWeight: '500',
+                  fontSize: '0.9rem',
+                }}
+              >
+                Sign In
+              </Link>
+              <Link
+                to="/register"
+                style={{
+                  backgroundColor: '#ffffff',
+                  color: '#0284c7',
+                  border: '1px solid #bae6fd',
+                  padding: '0.5rem 1.25rem',
+                  borderRadius: '0.375rem',
+                  textDecoration: 'none',
+                  fontWeight: '500',
+                  fontSize: '0.9rem',
+                }}
+              >
+                Create Account
+              </Link>
             </div>
           </div>
-        </section>
-
-      </main>
+        )}
+      </div>
     </div>
+  );
+}
+
+function PlaceholderPage({ title, description, allowedRoles }) {
+  return (
+    <div style={{ maxWidth: '960px', margin: '2rem auto', padding: '0 1rem' }}>
+      <div style={{
+        backgroundColor: '#ffffff',
+        borderRadius: '0.75rem',
+        padding: '2rem',
+        border: '1px solid #e2e8f0',
+      }}>
+        <h1 style={{ fontSize: '1.5rem', fontWeight: '700', color: '#0f172a', marginBottom: '0.5rem' }}>
+          {title}
+        </h1>
+        <p style={{ color: '#64748b', fontSize: '0.95rem', marginBottom: '1.5rem' }}>
+          {description}
+        </p>
+        <div style={{
+          backgroundColor: '#eff6ff',
+          padding: '1rem',
+          borderRadius: '0.5rem',
+          border: '1px solid #dbeafe',
+          color: '#1e40af',
+          fontSize: '0.875rem',
+        }}>
+          <strong>Stage 1 Route Placeholder:</strong> This section is protected and accessible to roles: <em>{allowedRoles ? allowedRoles.join(', ') : 'public'}</em>. Full interactive form implementation follows in subsequent Phase 7 stages.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NotFoundPage() {
+  return (
+    <div style={{ maxWidth: '600px', margin: '4rem auto', padding: '2rem', textAlign: 'center' }}>
+      <span style={{ fontSize: '3rem' }}>🔍</span>
+      <h1 style={{ fontSize: '1.75rem', fontWeight: '700', color: '#0f172a', marginTop: '1rem' }}>
+        Page Not Found (404)
+      </h1>
+      <p style={{ color: '#64748b', marginTop: '0.5rem', marginBottom: '1.5rem' }}>
+        The requested URL was not found on this server.
+      </p>
+      <Link
+        to="/"
+        style={{
+          display: 'inline-block',
+          backgroundColor: '#0284c7',
+          color: '#ffffff',
+          padding: '0.5rem 1.25rem',
+          borderRadius: '0.375rem',
+          textDecoration: 'none',
+          fontWeight: '500',
+        }}
+      >
+        Return Home
+      </Link>
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <BrowserRouter>
+        <Navbar />
+        <main style={{ flex: 1, paddingBottom: '2rem' }}>
+          <Routes>
+            <Route path="/" element={<HomePage />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+            <Route
+              path="/dashboard"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'account_holder', 'auditor']}>
+                  <DashboardPage />
+                </ProtectedRoute>
+              }
+            />
+            
+            {/* Protected Routes */}
+            <Route
+              path="/transfers"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'account_holder']}>
+                  <TransfersPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/statements"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'account_holder', 'auditor']}>
+                  <StatementsPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/admin"
+              element={
+                <ProtectedRoute allowedRoles={['admin']}>
+                  <AdminPortalPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/auditor"
+              element={
+                <ProtectedRoute allowedRoles={['auditor']}>
+                  <AuditorPortalPage />
+                </ProtectedRoute>
+              }
+            />
+
+            <Route path="*" element={<NotFoundPage />} />
+          </Routes>
+        </main>
+      </BrowserRouter>
+    </AuthProvider>
   );
 }
