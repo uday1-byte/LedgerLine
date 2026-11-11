@@ -1,9 +1,12 @@
 const app = require('./app');
 const env = require('./config/env');
 const prisma = require('./config/prisma');
-const { closeRedis } = require('./config/redis');
+const { initializeRedis, closeRedis } = require('./config/redis');
 
 const PORT = env.PORT || 5000;
+
+// Initiate Redis handshake immediately on server boot so client reaches ready state
+initializeRedis();
 
 const server = app.listen(PORT, () => {
   console.log(`=========================================`);

@@ -13,6 +13,10 @@ describe('Health & Readiness Endpoints', () => {
     setRedisClientForTesting(mockRedis);
   });
 
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
   afterAll(async () => {
     await closeRedis();
     await pool.end();
@@ -41,10 +45,24 @@ describe('Health & Readiness Endpoints', () => {
       expect(res.body).toHaveProperty('uptime');
       expect(res.body).toHaveProperty('timestamp');
     });
+
+    it('should return 200 OK without querying PostgreSQL or Prisma', async () => {
+      setRedisClientForTesting(null);
+      const poolSpy = jest.spyOn(pool, 'connect').mockRejectedValue(new Error('DB down'));
+      const prismaSpy = jest.spyOn(prisma, '$queryRaw').mockRejectedValue(new Error('Prisma down'));
+
+      const res = await request(app).get('/api/health/live');
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toHaveProperty('status', 'healthy');
+      expect(res.body).toHaveProperty('probe', 'liveness');
+      expect(poolSpy).not.toHaveBeenCalled();
+      expect(prismaSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe('GET /api/health/ready (Readiness Probe)', () => {
-    it('should return 200 OK when both PostgreSQL and Redis are connected', async () => {
+    it('should return 200 OK when PostgreSQL, Prisma, and Redis are connected', async () => {
       setRedisClientForTesting(mockRedis);
 
       const res = await request(app).get('/api/health/ready');
@@ -53,7 +71,9 @@ describe('Health & Readiness Endpoints', () => {
       expect(res.body).toHaveProperty('status', 'healthy');
       expect(res.body).toHaveProperty('probe', 'readiness');
       expect(res.body.dependencies.database.status).toBe('connected');
+      expect(res.body.dependencies.database.details.prisma).toBe('connected');
       expect(res.body.dependencies.redis.status).toBe('connected');
+      expect(res.body.dependencies.redis.details.status).toBe('ready');
     });
 
     it('should return 503 Service Unavailable when Redis is disconnected', async () => {
@@ -64,6 +84,32 @@ describe('Health & Readiness Endpoints', () => {
       expect(res.statusCode).toBe(503);
       expect(res.body).toHaveProperty('status', 'degraded');
       expect(res.body.dependencies.redis.status).toBe('disconnected');
+    });
+
+    it('should return 503 Service Unavailable when PostgreSQL is unavailable', async () => {
+      setRedisClientForTesting(mockRedis);
+      jest.spyOn(pool, 'connect').mockRejectedValueOnce(new Error('PostgreSQL unavailable'));
+
+      const res = await request(app).get('/api/health/ready');
+
+      expect(res.statusCode).toBe(503);
+      expect(res.body).toHaveProperty('status', 'degraded');
+      expect(res.body).toHaveProperty('probe', 'readiness');
+      expect(res.body.dependencies.database.status).toBe('disconnected');
+      expect(res.body.dependencies.redis.status).toBe('connected');
+    });
+
+    it('should return 503 Service Unavailable when Prisma check fails', async () => {
+      setRedisClientForTesting(mockRedis);
+      jest.spyOn(prisma, '$queryRaw').mockRejectedValueOnce(new Error('Prisma query failed'));
+
+      const res = await request(app).get('/api/health/ready');
+
+      expect(res.statusCode).toBe(503);
+      expect(res.body).toHaveProperty('status', 'degraded');
+      expect(res.body).toHaveProperty('probe', 'readiness');
+      expect(res.body.dependencies.database.status).toBe('disconnected');
+      expect(res.body.dependencies.redis.status).toBe('connected');
     });
   });
 
