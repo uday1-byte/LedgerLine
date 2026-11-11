@@ -98,7 +98,7 @@ export function LoginPage() {
             marginTop: '0.5rem',
             letterSpacing: '-0.02em',
           }}>
-            Sign In to LedgerLine
+            Sign In to BalanceVault
           </h1>
           <p style={{ color: '#64748b', fontSize: '0.875rem', marginTop: '0.25rem' }}>
             Enter your credentials to access your banking account

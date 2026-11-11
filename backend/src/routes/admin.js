@@ -23,9 +23,81 @@ const updateStatusSchema = z.object({
   isActive: z.boolean({ required_error: 'isActive (boolean) is required' }),
 });
 
+// User directory query schema
+const listUsersQuerySchema = z.object({
+  search: z.string().trim().max(255).optional(),
+  role: z.enum(['admin', 'account_holder', 'auditor']).optional(),
+  is_active: z.enum(['true', 'false']).transform((val) => val === 'true').optional(),
+});
+
 // Account assignment schema
 const assignOwnerSchema = z.object({
   userId: uuidSchema,
+});
+
+/**
+ * @route   GET /api/admin/users
+ * @desc    List registered users with optional username/email search, role, and active status filters.
+ *          Returns safe columns only (never password_hash).
+ * @access  Private (Admin only)
+ */
+router.get('/users', authenticateJWT, requireRole('admin'), async (req, res, next) => {
+  try {
+    const rawIsActive = req.query.is_active !== undefined ? req.query.is_active : req.query.isActive;
+    const normalizedQuery = {
+      search: typeof req.query.search === 'string' && req.query.search.trim() !== ''
+        ? req.query.search.trim()
+        : undefined,
+      role: typeof req.query.role === 'string' && req.query.role !== ''
+        ? req.query.role
+        : undefined,
+      is_active: rawIsActive !== undefined && rawIsActive !== ''
+        ? String(rawIsActive)
+        : undefined,
+    };
+
+    const queryResult = listUsersQuerySchema.safeParse(normalizedQuery);
+    if (!queryResult.success) {
+      return res.status(400).json({
+        error: 'ValidationError',
+        details: queryResult.error.flatten().fieldErrors,
+      });
+    }
+
+    const { search, role, is_active } = queryResult.data;
+    const conditions = [];
+    const params = [];
+
+    if (search) {
+      const escapedSearch = search.replace(/[\\%_]/g, '\\$&');
+      params.push(`%${escapedSearch}%`);
+      const idx = params.length;
+      conditions.push(`(username ILIKE $${idx} ESCAPE '\\' OR email ILIKE $${idx} ESCAPE '\\')`);
+    }
+
+    if (role) {
+      params.push(role);
+      conditions.push(`role = $${params.length}`);
+    }
+
+    if (typeof is_active === 'boolean') {
+      params.push(is_active);
+      conditions.push(`is_active = $${params.length}`);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const result = await pool.query(
+      `SELECT id, username, email, role, is_active, created_at, updated_at
+       FROM public.users
+       ${whereClause}
+       ORDER BY created_at DESC, id ASC`,
+      params
+    );
+
+    return res.json({ users: result.rows });
+  } catch (err) {
+    next(err);
+  }
 });
 
 /**

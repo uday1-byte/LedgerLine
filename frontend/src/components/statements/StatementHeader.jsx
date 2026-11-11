@@ -38,7 +38,7 @@ export function StatementHeader({
       {/* Neutral Print Header */}
       <div className="print-only" style={{ marginBottom: '1.25rem', borderBottom: '2px solid #0f172a', paddingBottom: '0.75rem' }}>
         <h1 style={{ fontSize: '1.5rem', fontWeight: '800', color: '#0f172a', margin: 0 }}>
-          LedgerLine Account Statement
+          BalanceVault Account Statement
         </h1>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', color: '#475569', marginTop: '0.35rem' }}>
           <span>Generated: {formatDateTime(new Date())}</span>

@@ -1,13 +1,25 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { api } from '../../api/client';
 import { Alert } from '../common/Alert';
+import { UserSelectField } from './UserSelectField';
 
 const UUID_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
-export function AssignOwnerModal({ isOpen, account, onClose, onSuccess }) {
+export function AssignOwnerModal({ isOpen, account, users = [], onClose, onSuccess }) {
   const [userId, setUserId] = useState('');
+  const [includeAllRoles, setIncludeAllRoles] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState(null);
+
+  const filterPredicate = useMemo(
+    () => (u) => (includeAllRoles ? true : u.role === 'account_holder'),
+    [includeAllRoles]
+  );
+
+  const selectedDirectoryUser = useMemo(
+    () => users.find((u) => u.id === userId.trim()) || null,
+    [users, userId]
+  );
 
   if (!isOpen || !account) return null;
 
@@ -52,6 +64,7 @@ export function AssignOwnerModal({ isOpen, account, onClose, onSuccess }) {
 
   const handleClose = () => {
     setUserId('');
+    setIncludeAllRoles(false);
     setError(null);
     setIsSubmitting(false);
     onClose();
@@ -125,13 +138,46 @@ export function AssignOwnerModal({ isOpen, account, onClose, onSuccess }) {
             )}
           </div>
 
-          {/* User UUID Input */}
+          {/* Searchable Customer Dropdown */}
+          <div style={{ marginBottom: '0.85rem' }}>
+            <UserSelectField
+              label="Search & Select Registered Customer"
+              users={users}
+              selectedUserId={userId.trim()}
+              onSelectUser={(nextId) => setUserId(nextId)}
+              filterPredicate={filterPredicate}
+              disabled={isSubmitting || isAlreadyAssigned}
+              searchPlaceholder="Search customer by username or email..."
+              emptyMessage="No matching customers found"
+              searchTestId="input-assign-user-search"
+              selectTestId="select-assign-user"
+              idPrefix="assign-owner"
+            />
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.775rem', color: '#475569', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                data-testid="checkbox-include-all-roles"
+                checked={includeAllRoles}
+                onChange={(e) => setIncludeAllRoles(e.target.checked)}
+                disabled={isSubmitting || isAlreadyAssigned}
+              />
+              Include non-customer roles (admin / auditor)
+            </label>
+          </div>
+
+          {selectedDirectoryUser && !selectedDirectoryUser.is_active && (
+            <div style={{ marginBottom: '1rem', padding: '0.6rem 0.75rem', backgroundColor: '#fef2f2', borderRadius: '0.375rem', border: '1px solid #fecaca', fontSize: '0.78rem', color: '#991b1b' }}>
+              ⚠️ <strong>Inactive User Selected:</strong> This user is deactivated. Account ownership can only be assigned to active users.
+            </div>
+          )}
+
+          {/* Manual UUID Fallback Input */}
           <div style={{ marginBottom: '1.25rem' }}>
             <label
               htmlFor="assign-user-uuid"
               style={{ display: 'block', fontSize: '0.85rem', fontWeight: '700', color: '#1e293b', marginBottom: '0.35rem' }}
             >
-              Target User UUID <span style={{ color: '#dc2626' }}>*</span>
+              Target User UUID <span style={{ fontWeight: '500', color: '#64748b' }}>(auto-filled or manual fallback)</span> <span style={{ color: '#dc2626' }}>*</span>
             </label>
             <input
               type="text"
@@ -152,9 +198,8 @@ export function AssignOwnerModal({ isOpen, account, onClose, onSuccess }) {
                 backgroundColor: isAlreadyAssigned ? '#f1f5f9' : '#ffffff',
               }}
             />
-            {/* Notice regarding absence of general user list */}
-            <div style={{ marginTop: '0.5rem', padding: '0.6rem 0.75rem', backgroundColor: '#f0fdf4', borderRadius: '0.375rem', border: '1px solid #bbf7d0', fontSize: '0.75rem', color: '#166534', lineHeight: '1.4' }}>
-              <strong>Architecture Notice:</strong> The backend has no general user-directory endpoint (`GET /api/users`). User UUIDs must be verified from authorized onboarding records or user session claims.
+            <div style={{ marginTop: '0.5rem', padding: '0.6rem 0.75rem', backgroundColor: '#f8fafc', borderRadius: '0.375rem', border: '1px solid #e2e8f0', fontSize: '0.75rem', color: '#475569', lineHeight: '1.4' }}>
+              Account ownership is <strong>immutable</strong> once assigned. Only active registered users can own customer bank accounts.
             </div>
           </div>
 

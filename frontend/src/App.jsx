@@ -31,7 +31,7 @@ function HomePage() {
           <span style={{ fontSize: '2.5rem' }}>⚖️</span>
           <div>
             <h1 style={{ fontSize: '1.75rem', fontWeight: '700', color: '#0f172a' }}>
-              LedgerLine Banking Platform
+              BalanceVault Banking Platform
             </h1>
             <p style={{ color: '#64748b', fontSize: '0.95rem' }}>
               Phase 7 Frontend Foundation: Double-Entry Ledger, Cash Invariants & Audit Trail

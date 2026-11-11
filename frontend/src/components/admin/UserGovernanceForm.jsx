@@ -1,10 +1,16 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { api } from '../../api/client';
 import { Alert } from '../common/Alert';
+import { UserSelectField } from './UserSelectField';
 
 const UUID_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
-export function UserGovernanceForm({ currentAdminUserId }) {
+export function UserGovernanceForm({
+  currentAdminUserId,
+  users = [],
+  selectedUser = null,
+  onUserUpdated,
+}) {
   // 1. Role Update State
   const [roleUserId, setRoleUserId] = useState('');
   const [selectedRole, setSelectedRole] = useState('account_holder');
@@ -20,6 +26,20 @@ export function UserGovernanceForm({ currentAdminUserId }) {
   const [isUpdatingStatus, setIsUpdatingStatus] = useState(false);
   const [statusMessage, setStatusMessage] = useState(null);
   const [statusError, setStatusError] = useState(null);
+
+  // Sync both cards when an admin selects a user row from the Registered Users table
+  useEffect(() => {
+    if (!selectedUser) return;
+    setRoleUserId(selectedUser.id);
+    setSelectedRole(selectedUser.role || 'account_holder');
+    setRoleError(null);
+    setRoleMessage(null);
+
+    setStatusUserId(selectedUser.id);
+    setSelectedStatus(!selectedUser.is_active);
+    setStatusError(null);
+    setStatusMessage(null);
+  }, [selectedUser]);
 
   // === Handlers for Role ===
   const handleInitiateRoleUpdate = (e) => {
@@ -53,6 +73,7 @@ export function UserGovernanceForm({ currentAdminUserId }) {
       // Non-optimistic: Update only after backend response
       setRoleMessage(`Successfully updated user ${res.user.id} role to ${res.user.role}.`);
       setRoleConfirmationOpen(false);
+      onUserUpdated?.();
     } catch (err) {
       let msg = err.message || 'Failed to update user role';
       if (err.status === 404) {
@@ -99,6 +120,7 @@ export function UserGovernanceForm({ currentAdminUserId }) {
       // Non-optimistic: Update only after backend response
       setStatusMessage(`Successfully set user ${res.user.id} active status to ${res.user.is_active}.`);
       setStatusConfirmationOpen(false);
+      onUserUpdated?.();
     } catch (err) {
       let msg = err.message || 'Failed to update user status';
       if (err.status === 404) {
@@ -149,12 +171,25 @@ export function UserGovernanceForm({ currentAdminUserId }) {
         )}
 
         <form onSubmit={handleInitiateRoleUpdate}>
+          <UserSelectField
+            label="Select Registered User"
+            users={users}
+            selectedUserId={roleUserId.trim()}
+            onSelectUser={(nextId, userObj) => {
+              setRoleUserId(nextId);
+              if (userObj) setSelectedRole(userObj.role);
+            }}
+            disabled={isUpdatingRole}
+            searchTestId="input-role-user-search"
+            selectTestId="select-role-user"
+            idPrefix="role-user"
+          />
           <div style={{ marginBottom: '1rem' }}>
             <label
               htmlFor="role-target-uuid"
               style={{ display: 'block', fontSize: '0.85rem', fontWeight: '700', color: '#1e293b', marginBottom: '0.35rem' }}
             >
-              Target User UUID <span style={{ color: '#dc2626' }}>*</span>
+              Target User UUID <span style={{ fontWeight: '500', color: '#64748b' }}>(or manual fallback)</span> <span style={{ color: '#dc2626' }}>*</span>
             </label>
             <input
               type="text"
@@ -315,12 +350,25 @@ export function UserGovernanceForm({ currentAdminUserId }) {
         )}
 
         <form onSubmit={handleInitiateStatusUpdate}>
+          <UserSelectField
+            label="Select Registered User"
+            users={users}
+            selectedUserId={statusUserId.trim()}
+            onSelectUser={(nextId, userObj) => {
+              setStatusUserId(nextId);
+              if (userObj) setSelectedStatus(!userObj.is_active);
+            }}
+            disabled={isUpdatingStatus}
+            searchTestId="input-status-user-search"
+            selectTestId="select-status-user"
+            idPrefix="status-user"
+          />
           <div style={{ marginBottom: '1rem' }}>
             <label
               htmlFor="status-target-uuid"
               style={{ display: 'block', fontSize: '0.85rem', fontWeight: '700', color: '#1e293b', marginBottom: '0.35rem' }}
             >
-              Target User UUID <span style={{ color: '#dc2626' }}>*</span>
+              Target User UUID <span style={{ fontWeight: '500', color: '#64748b' }}>(or manual fallback)</span> <span style={{ color: '#dc2626' }}>*</span>
             </label>
             <input
               type="text"

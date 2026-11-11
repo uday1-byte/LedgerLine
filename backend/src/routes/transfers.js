@@ -10,24 +10,6 @@ const SYSTEM_CASH_CLEARING_ID = '00000000-0000-0000-0000-000000000002';
 
 const router = express.Router();
 
-// Input validation schema for basic transfer
-const transferSchema = z.object({
-  sourceAccountId: z.string().uuid({ message: 'sourceAccountId must be a valid UUID' }),
-  destinationAccountId: z.string().uuid({ message: 'destinationAccountId must be a valid UUID' }),
-  amountPaise: z.union([
-    z.number().int().positive({ message: 'amountPaise must be a positive integer' }),
-    z.string().regex(/^\d+$/, { message: 'amountPaise must be a positive integer string' }).transform((val) => parseInt(val, 10))
-  ]),
-}).refine((data) => data.sourceAccountId !== data.destinationAccountId, {
-  message: 'sourceAccountId and destinationAccountId must be different accounts',
-  path: ['destinationAccountId'],
-});
-
-// Input validation schema for transfer reversal
-const reversalSchema = z.object({
-  reversalReason: z.string().trim().min(1, { message: 'reversalReason cannot be empty' }).max(255).optional().default('Customer requested reversal'),
-});
-
 const PG_MAX_BIGINT = 9223372036854775807n;
 
 // Reusable amount validation: safe integer or decimal string <= PG_MAX_BIGINT
@@ -42,6 +24,21 @@ const amountPaiseSchema = z.union([
     .transform((val) => BigInt(val)),
 ]).refine((val) => val <= PG_MAX_BIGINT, {
   message: `amountPaise exceeds maximum allowed value (${PG_MAX_BIGINT.toString()})`,
+});
+
+// Input validation schema for basic transfer
+const transferSchema = z.object({
+  sourceAccountId: z.string().uuid({ message: 'sourceAccountId must be a valid UUID' }),
+  destinationAccountId: z.string().uuid({ message: 'destinationAccountId must be a valid UUID' }),
+  amountPaise: amountPaiseSchema,
+}).refine((data) => data.sourceAccountId !== data.destinationAccountId, {
+  message: 'sourceAccountId and destinationAccountId must be different accounts',
+  path: ['destinationAccountId'],
+});
+
+// Input validation schema for transfer reversal
+const reversalSchema = z.object({
+  reversalReason: z.string().trim().min(1, { message: 'reversalReason cannot be empty' }).max(255).optional().default('Customer requested reversal'),
 });
 
 // Input validation schema for customer deposits
@@ -216,7 +213,7 @@ router.post('/', authenticateJWT, requireRole('admin', 'account_holder'), financ
     }
 
     const sourceBalance = BigInt(sourceAccount.balance_paise);
-    const transferAmount = BigInt(amountPaise);
+    const transferAmount = amountPaise;
 
     // 7. Check whether the sender has sufficient funds using the locked balance
     if (sourceBalance < transferAmount) {

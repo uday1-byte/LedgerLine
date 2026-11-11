@@ -142,7 +142,7 @@ export function RegisterPage() {
             Open Your Account
           </h1>
           <p style={{ color: '#64748b', fontSize: '0.875rem', marginTop: '0.25rem' }}>
-            Register to start banking with LedgerLine
+            Register to start banking with BalanceVault
           </p>
         </div>
 
@@ -407,7 +407,7 @@ export function RegisterPage() {
           fontSize: '0.875rem',
           color: '#64748b',
         }}>
-          Already registered with LedgerLine?{' '}
+          Already registered with BalanceVault?{' '}
           <Link
             to="/login"
             style={{

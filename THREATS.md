@@ -1,6 +1,6 @@
-# 🛡️ LedgerLine — Threat Model & Security Architecture
+# 🛡️ BalanceVault (formerly LedgerLine) — Threat Model & Security Architecture
 
-This document provides a comprehensive threat analysis for the LedgerLine financial application using the **STRIDE** methodology (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege) combined with banking domain-specific failure mode analysis.
+This document provides a comprehensive threat analysis for the **BalanceVault** (formerly **LedgerLine**) financial application using the **STRIDE** methodology (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege) combined with banking domain-specific failure mode analysis. Internal PostgreSQL roles (`ledgerline_app`, `ledgerline_owner`), database names (`ledgerline_dev`, `ledgerline_test`), and client session compatibility keys (`ledgerline_session_token`) retain their historical identifiers.
 
 Each threat is documented using a standardized five-part format:
 1. **Threat & Potential Impact**
@@ -15,13 +15,14 @@ Each threat is documented using a standardized five-part format:
 
 In a financial double-entry banking system, integrity, auditability, and immutability are paramount. A single undetected data tampering incident or calculation flaw causes monetary loss, regulatory failure, and broken trust.
 
-LedgerLine operates under strict mathematical and database-enforced invariants:
-- **Integer Paise Arithmetic:** All money is tracked in integer paise ($1\text{ INR} = 100\text{ paise}$). Floating-point arithmetic is prohibited.
+BalanceVault operates under strict mathematical and database-enforced invariants:
+- **Integer Paise Arithmetic (`BigInt`):** All money is tracked in integer paise ($1\text{ INR} = 100\text{ paise}$) using PostgreSQL `BIGINT` and native JavaScript `BigInt`. Shared Zod validation (`amountPaiseSchema`) enforces positive safe integers or canonical decimal digit strings up to `PG_MAX_BIGINT` (`9223372036854775807n`) across transfers, deposits, and withdrawals (replacing earlier `parseInt` conversion on transfers). Floating-point arithmetic is prohibited.
 - **Double-Entry Balancing (`LL001`–`LL004`):** Every financial mutation produces exactly two balanced ledger entries (one debit, one credit) matching the transfer amount.
 - **Append-Only Immutability (`LL007`):** Ledger entries, completed transfers, and refusal audit logs are append-only. `ledgerline_app` cannot update or delete ledger entries through its granted application privileges, and database triggers reject normal UPDATE and DELETE operations. The privileged schema owner remains a trust boundary capable of altering schema or triggers (immutability protects against application-level operations, but is not an absolute impossibility of bypass by privileged database roles).
 - **Concurrency Serialization:** Transfers lock accounts in canonical ascending UUID order (`ORDER BY id ASC FOR UPDATE`) to serialize access and reduce deadlock risk.
 - **Duplicate Request Protection:** Mutating endpoints enforce scoped, hashed idempotency keys preventing duplicate execution for the same applicable key and scope.
-- **Least-Privilege Separation:** The runtime application (`ledgerline_app`) cannot alter tables, disable triggers, or truncate data.
+- **Fail-Closed Distributed Rate Limiting:** Redis-backed rate limiters protect financial mutations (`financialMutationLimiter`, failing closed `503` in all environments when Redis is unavailable) and authentication (`authLimiter`, failing closed `503` in production).
+- **Least-Privilege Separation:** The runtime application (`ledgerline_app`) cannot alter tables, disable triggers, or truncate data. Ordinary account reads use Prisma ORM restricted to `ledgerline_app`, while transactional financial writes execute via parameterized `pg.Pool` queries.
 
 ---
 
@@ -116,15 +117,16 @@ The table below contrasts the vulnerabilities identified during the initial base
      - Deposits: `deposit:<accountId>`
      - Withdrawals: `withdraw:<accountId>`
      - Reversals: `reversal:<originalTransferId>`
-   - The backend stores a SHA-256 hash of canonical business parameters.
+   - The backend stores a SHA-256 hash of canonical business parameters (including `amountPaise.toString()` for exact `BigInt` equality above `Number.MAX_SAFE_INTEGER`).
    - Replaying the identical key with matching parameters returns the cached result with HTTP header `Idempotent-Replayed: true`.
-   - Re-sending the same key with altered parameters returns HTTP `409 Conflict` (`IdempotencyConflictError`).
+   - Re-sending the same key with altered parameters (including 1-paise deltas beyond `Number.MAX_SAFE_INTEGER`) returns HTTP `409 Conflict` (`IdempotencyConflictError`).
    - If an in-flight request fails business solvency checks (HTTP 422), the transaction rolls back, releasing the key reservation so the client can fund the account and retry.
 4. **Supporting Implementation or Test Evidence:**
    - [`backend/tests/ledger.test.js`](file:///d:/LedgerLine/backend/tests/ledger.test.js) &mdash; Tests 8, 9, 10, 15.
+   - [`backend/tests/transfers.test.js`](file:///d:/LedgerLine/backend/tests/transfers.test.js) &mdash; `BigInt` precision, 1-paise conflict detection, and concurrent race regression tests.
    - [`frontend/src/test/transfers.test.jsx`](file:///d:/LedgerLine/frontend/src/test/transfers.test.jsx) &mdash; Tests 4, 8, 9.
 5. **Remaining Limitations & Residual Risk:**
-   Idempotency records persist indefinitely unless archived. Idempotency does not protect against an attacker issuing fresh requests with newly generated UUID keys; application-level rate limiting and session authentication are required.
+   Idempotency records persist indefinitely unless archived. Idempotency alone does not stop an authenticated caller from issuing distinct requests with newly generated UUID keys; `financialMutationLimiter` mitigates rapid automation by capping authenticated users at `30` requests per minute (failing closed with HTTP `503` if Redis is unavailable), subject to ephemeral free-tier Redis counter resets.
 
 ---
 
@@ -217,14 +219,16 @@ The table below contrasts the vulnerabilities identified during the initial base
 2. **Relevant Attack Scenario:** Alice (`account_holder`) discovers Bob's account UUID and issues `GET /api/accounts/:id`, `GET /api/accounts/:id/statement`, or `POST /api/transfers` with Bob's account as `sourceAccountId`.
 3. **Implemented Mitigation:**
    - Every protected route enforces `authenticateJWT` and extracts `req.user.id`.
-   - `GET /api/accounts` filters rows strictly to `user_id = req.user.id`.
+   - `GET /api/accounts` filters rows via Prisma strictly to `{ user_id: req.user.id, account_type: 'customer' }` for account holders (admins and auditors view all accounts).
    - `GET /api/accounts/:id` and `GET /api/accounts/:id/statement` check `account.user_id === req.user.id`. If non-owned or unassigned, returns HTTP `403 Forbidden`.
+   - `GET /api/admin/users` enforces `requireRole('admin')`, blocking unauthenticated (`401`), inactive (`403`), `account_holder` (`403`), and `auditor` (`403`) requests while returning strictly safe columns (never `password_hash`).
    - `POST /api/transfers` locks the source account inside the transaction and enforces `sourceAccount.user_id === req.user.id`.
    - Auditors are strictly read-only; attempting any mutating transfer, reversal, or account creation returns HTTP `403 Forbidden`.
 4. **Supporting Implementation or Test Evidence:**
-   - [`backend/tests/rbac.test.js`](file:///d:/LedgerLine/backend/tests/rbac.test.js) &mdash; 26 tests verifying IDOR prevention across listing, inspection, transfers, and reversals.
+   - [`backend/tests/rbac.test.js`](file:///d:/LedgerLine/backend/tests/rbac.test.js) &mdash; IDOR prevention across account listing, inspection, transfers, reversals, and admin user-directory RBAC/safe-field checks.
+   - [`backend/tests/prisma.test.js`](file:///d:/LedgerLine/backend/tests/prisma.test.js) &mdash; Restricted `ledgerline_app` Prisma read verification (`4` tests).
 5. **Remaining Limitations & Residual Risk:**
-   Express middleware is the sole authorization authority. PostgreSQL `SECURITY DEFINER` functions enforce table invariants, but do not independently verify HTTP caller identity or JWT claims.
+   Express middleware is the sole authorization authority. PostgreSQL `SECURITY DEFINER` functions enforce table invariants, but do not independently verify HTTP caller identity or JWT claims. Additionally, `GET /api/admin/users` currently lacks `limit`/`offset` pagination, and live auditor and money-movement workflows remain awaiting production smoke tests.
 
 ---
 
@@ -245,20 +249,25 @@ The table below contrasts the vulnerabilities identified during the initial base
 
 ---
 
-### 4.9 Password Handling, JWT Secrets & Frontend Token Storage
-1. **Threat & Potential Impact:** Password database compromise, brute-force enumeration, token forgery via weak secrets, or persistent token theft via browser local storage.
+### 4.9 Authentication Rate Limiting, Password Handling, JWT Secrets & Frontend Token Storage
+1. **Threat & Potential Impact:** Password database compromise, credential stuffing or brute-force login/registration floods, token forgery via weak secrets, or persistent token theft via browser local storage.
 2. **Relevant Attack Scenario:**
+   - An attacker conducts high-rate password spraying against `POST /api/auth/login` or spoofed-header brute-force attacks behind a reverse proxy.
    - An attacker attempts timing attacks during login to enumerate registered email addresses.
    - An attacker extracts long-lived authentication tokens from browser `localStorage` via persistent XSS.
 3. **Implemented Mitigation:**
-   - **Bcrypt Work Factor 12:** Passwords hashed with `bcryptjs` using 12 salt rounds. Passwords require a minimum of 8 characters, at least 1 letter, and at least 1 number.
+   - **Redis-Backed Authentication Rate Limiter (`authLimiter`):** [`backend/src/middleware/rateLimiter.js`](file:///d:/LedgerLine/backend/src/middleware/rateLimiter.js) throttles `POST /api/auth/register` and `POST /api/auth/login` at `10` requests per `15` minutes per client IP (`ipKeyGenerator(req.ip)` behind Render's single proxy hop `app.set('trust proxy', 1)` in [`backend/src/app.js`](file:///d:/LedgerLine/backend/src/app.js)). When `NODE_ENV === 'production'`, if Redis is disconnected or errors, `authLimiter` **fails closed with HTTP `503 Service Unavailable`** (no silent `MemoryStore` fallback; process-local `MemoryStore` fallback is permitted strictly in development/test).
+   - **Production Startup Secret & Config Enforcement:** [`backend/src/config/env.js`](file:///d:/LedgerLine/backend/src/config/env.js) refuses startup in `NODE_ENV=production` if `JWT_SECRET` is missing, shorter than 32 characters, or uses a known development/placeholder secret, or if `RATE_LIMIT_ENABLED=false`.
+   - **Bcrypt Work Factor 12:** Passwords hashed with `bcryptjs` using 12 salt rounds. Passwords require a minimum of 8 characters, at least 1 letter, and at least 1 number (Zod v4 validation issues reported via `error.issues`).
    - **Timing Mitigation (`dummyVerifyPassword`):** When an email is not found in `public.users`, `auth.js` runs `dummyVerifyPassword` against a precomputed work-factor-12 dummy hash, equalizing response latency and mitigating user enumeration.
    - **Token Storage Policy:** The React frontend stores JWT tokens in-memory in React state, with tab-scoped fallback to `sessionStorage` (`ledgerline_session_token`) to survive page reloads within an active tab. Persistent `localStorage` is intentionally avoided so tokens are wiped when the browser tab closes.
 4. **Supporting Implementation or Test Evidence:**
    - [`backend/src/utils/password.js`](file:///d:/LedgerLine/backend/src/utils/password.js) &mdash; `hashPassword`, `verifyPassword`, `dummyVerifyPassword`.
+   - [`backend/src/middleware/rateLimiter.js`](file:///d:/LedgerLine/backend/src/middleware/rateLimiter.js) & [`backend/tests/ratelimit.test.js`](file:///d:/LedgerLine/backend/tests/ratelimit.test.js) &mdash; Auth 429 throttling, single-hop `X-Forwarded-For` isolation, dev fallback, and production fail-closed `503`.
+   - [`backend/tests/env.test.js`](file:///d:/LedgerLine/backend/tests/env.test.js) &mdash; Production `JWT_SECRET`, `REDIS_URL`, `DATABASE_URL`, and `CLIENT_URL` validation (`14` tests).
    - [`frontend/src/api/client.js`](file:///d:/LedgerLine/frontend/src/api/client.js) &mdash; In-memory and `sessionStorage` token management.
 5. **Remaining Limitations & Residual Risk:**
-   Same-origin scripts running within the active tab lifecycle could access `sessionStorage` if an XSS vulnerability existed. Subresource integrity (SRI) and Content Security Policy (CSP) headers must be enforced in production deployments.
+   Same-origin scripts running within the active tab lifecycle could access `sessionStorage` if an XSS vulnerability existed; Subresource Integrity (SRI) and Content Security Policy (CSP) headers must be enforced in production deployments. Additionally, ephemeral/free-tier Redis restarts or evictions can reset active auth rate-limit window counters.
 
 ---
 
@@ -273,7 +282,7 @@ The table below contrasts the vulnerabilities identified during the initial base
 4. **Supporting Implementation or Test Evidence:**
    - [`backend/tests/audit.test.js`](file:///d:/LedgerLine/backend/tests/audit.test.js) &mdash; 10 tests verifying action support, rollback ordering, 404 safety, and immutability triggers.
 5. **Remaining Limitations & Residual Risk:**
-   Anonymous (unauthenticated) 401 requests are not audited to prevent denial-of-service database flooding from unauthenticated attackers.
+   Anonymous (unauthenticated) 401 requests are not audited to prevent denial-of-service database flooding from unauthenticated attackers; `financialMutationLimiter` (30 req/min/user in Redis, failing closed `503`) bounds authenticated request floods prior to DB execution. Additionally, while `POST /api/transfers/deposit` and `POST /api/transfers/withdraw` persist refusals to `audit_refused_attempts` and assign `account_entry_sequence`, `POST /api/transfers` and `POST /api/transfers/:id/reversal` do not currently write to `audit_refused_attempts` or increment `account_entry_sequence`.
 
 ---
 
@@ -306,14 +315,16 @@ The table below contrasts the vulnerabilities identified during the initial base
        process.exit(1);
      }
      ```
-   - **Forward-Only Migrations:** In [`backend/src/scripts/migrate.js`](file:///d:/LedgerLine/backend/src/scripts/migrate.js), migrations are applied in forward-only transactions recorded in `schema_migrations`; they contain zero `DROP TABLE` or `TRUNCATE` statements.
-   - **Deployment Status:** Production deployment is currently **Pending Deployment**; no production databases are connected.
+   - **Forward-Only Migrations & Role Enforcement:** In [`backend/src/scripts/migrate.js`](file:///d:/LedgerLine/backend/src/scripts/migrate.js), migrations run in forward-only transactions under `ledgerline_owner` (`schema_migrations`), containing zero `DROP TABLE` or `TRUNCATE` statements.
+   - **Production Startup Guardrails & Runtime Health Probes:** [`backend/src/config/env.js`](file:///d:/LedgerLine/backend/src/config/env.js) rejects missing/default/weak `JWT_SECRET`, non-`ledgerline_app` or non-TLS `DATABASE_URL`, missing/localhost `REDIS_URL`, localhost `CLIENT_URL`, or `RATE_LIMIT_ENABLED=false` when `NODE_ENV=production`. [`backend/src/routes/health.js`](file:///d:/LedgerLine/backend/src/routes/health.js) separates dependency-free `/api/health/live` from `/api/health/ready` (`pg.Pool` + `prisma.$queryRaw` + Redis `PING`, returning `503` if any required dependency is down).
+   - **Production Deployment & Verification Status:** Production is deployed on **Render** ([`https://balancevault-api-7typ.onrender.com`](https://balancevault-api-7typ.onrender.com) and [`https://balancevault-web-25xe.onrender.com`](https://balancevault-web-25xe.onrender.com)), connected to **Neon PostgreSQL** (`neondb`, migrations `001`–`006` + initial admin bootstrap completed under TLS `ledgerline_app` runtime) and **Render Key Value Redis** (`REDIS_URL`). Both `/api/health/live` and `/api/health/ready` (confirming PostgreSQL, Prisma, and Redis readiness), user registration, login, and customer dashboard loading have been verified live. **Live financial workflows (`deposit`, `withdraw`, `transfer`, `reversal`) and auditor workflows have NOT yet been tested live in production and remain awaiting live production smoke tests.** Uncommitted local enhancements (`GET /api/admin/users` + searchable Admin Portal UI, transfer `BigInt` precision fix, `BalanceVault` frontend UI rebrand, and updated documentation) await commit, push, and Render redeploy.
 4. **Supporting Implementation or Test Evidence:**
    - [`backend/src/scripts/preflight_006.js`](file:///d:/LedgerLine/backend/src/scripts/preflight_006.js) lines 1–120.
-   - [`backend/src/scripts/migrate.js`](file:///d:/LedgerLine/backend/src/scripts/migrate.js).
-   - [`backend/tests/helpers/auth.js`](file:///d:/LedgerLine/backend/tests/helpers/auth.js).
+   - [`backend/src/scripts/migrate.js`](file:///d:/LedgerLine/backend/src/scripts/migrate.js) & [`backend/tests/migrations.test.js`](file:///d:/LedgerLine/backend/tests/migrations.test.js) (`2` tests).
+   - [`backend/tests/helpers/auth.js`](file:///d:/LedgerLine/backend/tests/helpers/auth.js), [`backend/tests/health.test.js`](file:///d:/LedgerLine/backend/tests/health.test.js) (`9` tests), [`backend/tests/redis.test.js`](file:///d:/LedgerLine/backend/tests/redis.test.js) (`5` tests), and [`render.yaml`](file:///d:/LedgerLine/render.yaml).
+   - **Verified Local Automated Suite Totals:** **298 tests passed (`178` backend across `16` Jest suites; `120` frontend across `10` Vitest files)**.
 5. **Remaining Limitations & Residual Risk:**
-   The migration runner `migrate.js` connects to whatever `DB_NAME` is configured in `backend/.env` without a hardcoded database name guard. Operators must verify environment variables before running migrations on production hosts.
+   The migration runner `migrate.js` connects to whatever `DB_NAME` / `DATABASE_URL` is configured without a hardcoded database-name allowlist guard (unlike `preflight_006.js`). Operators must verify environment variables before running migrations on production hosts.
 
 ---
 
@@ -335,9 +346,9 @@ The table below contrasts the vulnerabilities identified during the initial base
 
 | Category | Component | Specific Risk | Implemented Mitigation | Residual Risk |
 | :--- | :--- | :--- | :--- | :--- |
-| **Spoofing** | Auth / HTTP | Token forgery or stolen credentials | Bcrypt work factor 12, timing mitigation, stateless Bearer JWT with live database validation | Token theft via active tab XSS before tab close |
-| **Tampering** | Ledger / DB | Altering historical ledger rows or balances | Append-only triggers (`LL007`), deferred constraint balancing (`LL001`–`LL004`), least-privilege role grants | Direct balance updates outside Express require operational reconciliation (periodic reconciliation queries are a recommended operational control and are not currently implemented as an automated scheduled service) |
-| **Repudiation** | Mutating APIs | Denying a transfer or withdrawal | Append-only `ledger_entries`, `audit_refused_attempts`, and unique idempotency keys | Refusals for anonymous 401s are unlogged |
-| **Information Disclosure** | API / DB | Balance leakage or customer enumeration | Strict ownership isolation (IDOR checks), dummy bcrypt verification, `.gitignore` of `*.env` | Errors during development should be sanitized in production |
-| **Denial of Service** | Transfers / Locking | Deadlocks or connection exhaustion | Deterministic lock ordering (`ORDER BY id ASC`), connection pool bounds (20), bounded idempotency retries | Complex multi-table foreign locks under extreme concurrent load |
-| **Elevation of Privilege** | RBAC / Admin | Regular user escalating to admin | Registration role defaulting, advisory-locked admin functions, last-active-admin protection (`LL007`) | Compromised host system administrator |
+| **Spoofing** | Auth / HTTP | Token forgery, brute-force logins, or stolen credentials | Bcrypt work factor 12, timing mitigation, stateless Bearer JWT with live DB check, production `JWT_SECRET` guard (`env.js`), Redis `authLimiter` (10/15m/IP; fail-closed `503` in production) | Token theft via active-tab XSS before tab close; volatile free-tier Redis counter resets |
+| **Tampering** | Ledger / DB | Altering historical ledger rows or balances, precision drift | Append-only triggers (`LL007`), deferred balancing (`LL001`–`LL004`), `BigInt` `amountPaiseSchema` (`<= PG_MAX_BIGINT`), least-privilege role grants (`ledgerline_app`) | Direct balance updates outside Express require operational reconciliation (periodic reconciliation queries are a recommended operational control and are not currently implemented as an automated scheduled service) |
+| **Repudiation** | Mutating APIs | Denying a transfer, deposit, or withdrawal | Append-only `ledger_entries`, `audit_refused_attempts` (`/deposit`, `/withdraw`), and scoped SHA-256 idempotency keys | Anonymous `401`s are unlogged; `/api/transfers` and `/:id/reversal` do not yet record `audit_refused_attempts` or `account_entry_sequence` |
+| **Information Disclosure** | API / DB | Balance leakage, user password hashes, or enumeration | Strict ownership isolation (IDOR checks), `GET /api/admin/users` safe projection (no `password_hash`), dummy bcrypt verification, `.gitignore` of `*.env` | Unintended verbose stack traces prevented only when `NODE_ENV !== 'development'`; production audit of error responses ongoing |
+| **Denial of Service** | API / Redis / DB | Auth/mutation floods, deadlocks, or Redis outages | Redis `financialMutationLimiter` (30/min/user; fail-closed `503` always) & `authLimiter`, `initializeRedis()` boot handshake + `'ready'` gating, deterministic `ORDER BY id ASC` locking, bounded idempotency retries | Ephemeral free-tier Redis resets/outages cause controlled `503` unavailability; `GET /api/admin/users` lacks pagination; complex multi-table contention under extreme load |
+| **Elevation of Privilege** | RBAC / Admin | Regular user escalating to admin or accessing directory | Registration role defaulting, admin-only `GET /api/admin/users` (`403` for non-admins/auditors), advisory-locked admin functions, last-active-admin protection (`LL007`) | Compromised host or `ledgerline_owner` credentials; auditor workflows still awaiting live production smoke tests |

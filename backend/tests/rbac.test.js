@@ -479,4 +479,97 @@ describe('Phase 5 Step 2: Role-Based Access Control (RBAC) & Account Ownership',
       expect(res2.status).toBe(404);
     });
   });
+
+  // ─── 6. Administrative User Directory (GET /api/admin/users) ───────────────
+
+  describe('Administrative User Directory (GET /api/admin/users)', () => {
+    it('allows an admin to list registered users with safe fields only (never password_hash)', async () => {
+      const res = await request(app)
+        .get('/api/admin/users')
+        .set('Authorization', `Bearer ${adminUser.token}`);
+
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.users)).toBe(true);
+      expect(res.body.users.length).toBeGreaterThanOrEqual(5);
+
+      const expectedIds = [
+        adminUser.user.id,
+        accountHolder1.user.id,
+        accountHolder2.user.id,
+        auditorUser.user.id,
+        inactiveUser.user.id,
+      ];
+      const returnedIds = res.body.users.map((u) => u.id);
+      for (const expectedId of expectedIds) {
+        expect(returnedIds).toContain(expectedId);
+      }
+
+      for (const u of res.body.users) {
+        expect(u).toHaveProperty('id');
+        expect(u).toHaveProperty('username');
+        expect(u).toHaveProperty('email');
+        expect(u).toHaveProperty('role');
+        expect(u).toHaveProperty('is_active');
+        expect(u).toHaveProperty('created_at');
+        expect(u).toHaveProperty('updated_at');
+        expect(u).not.toHaveProperty('password_hash');
+      }
+    });
+
+    it('supports search by username/email and filters by role and active status', async () => {
+      const byRoleAndStatus = await request(app)
+        .get('/api/admin/users?role=account_holder&is_active=false')
+        .set('Authorization', `Bearer ${adminUser.token}`);
+
+      expect(byRoleAndStatus.status).toBe(200);
+      const inactiveIds = byRoleAndStatus.body.users.map((u) => u.id);
+      expect(inactiveIds).toContain(inactiveUser.user.id);
+      expect(inactiveIds).not.toContain(accountHolder1.user.id);
+      expect(inactiveIds).not.toContain(auditorUser.user.id);
+
+      const bySearch = await request(app)
+        .get(`/api/admin/users?search=${encodeURIComponent(accountHolder1.user.username)}`)
+        .set('Authorization', `Bearer ${adminUser.token}`);
+
+      expect(bySearch.status).toBe(200);
+      expect(bySearch.body.users.some((u) => u.id === accountHolder1.user.id)).toBe(true);
+      expect(bySearch.body.users.every((u) => !u.password_hash)).toBe(true);
+
+      const byEmailSearch = await request(app)
+        .get(`/api/admin/users?search=${encodeURIComponent(auditorUser.user.email)}`)
+        .set('Authorization', `Bearer ${adminUser.token}`);
+
+      expect(byEmailSearch.status).toBe(200);
+      expect(byEmailSearch.body.users.map((u) => u.id)).toContain(auditorUser.user.id);
+    });
+
+    it('rejects invalid query filter values with 400 ValidationError', async () => {
+      const res = await request(app)
+        .get('/api/admin/users?role=superuser')
+        .set('Authorization', `Bearer ${adminUser.token}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('ValidationError');
+    });
+
+    it('denies account_holder, auditor, inactive users, and unauthenticated requests', async () => {
+      const unauthRes = await request(app).get('/api/admin/users');
+      expect(unauthRes.status).toBe(401);
+
+      const holderRes = await request(app)
+        .get('/api/admin/users')
+        .set('Authorization', `Bearer ${accountHolder1.token}`);
+      expect(holderRes.status).toBe(403);
+
+      const auditorRes = await request(app)
+        .get('/api/admin/users')
+        .set('Authorization', `Bearer ${auditorUser.token}`);
+      expect(auditorRes.status).toBe(403);
+
+      const inactiveRes = await request(app)
+        .get('/api/admin/users')
+        .set('Authorization', `Bearer ${inactiveUser.token}`);
+      expect(inactiveRes.status).toBe(403);
+    });
+  });
 });

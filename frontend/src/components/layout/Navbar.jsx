@@ -58,7 +58,7 @@ export function Navbar() {
           <span style={{ fontSize: '1.75rem' }} role="img" aria-label="balance scale">⚖️</span>
           <div>
             <span style={{ fontSize: '1.25rem', fontWeight: '700', letterSpacing: '-0.02em' }}>
-              LedgerLine
+              BalanceVault
             </span>
             <span style={{
               marginLeft: '0.5rem',

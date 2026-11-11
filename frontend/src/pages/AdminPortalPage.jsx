@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { api } from '../api/client';
@@ -6,6 +6,7 @@ import { CreateAccountModal } from '../components/admin/CreateAccountModal';
 import { AssignOwnerModal } from '../components/admin/AssignOwnerModal';
 import { UserGovernanceForm } from '../components/admin/UserGovernanceForm';
 import { UnassignedAccountsTable } from '../components/admin/UnassignedAccountsTable';
+import { RegisteredUsersTable } from '../components/admin/RegisteredUsersTable';
 import { Alert } from '../components/common/Alert';
 import { formatPaiseToINR } from '../utils/currency';
 import { formatDateTime } from '../utils/date';
@@ -17,11 +18,23 @@ export function AdminPortalPage() {
   const [accounts, setAccounts] = useState([]);
   const [loadingAccounts, setLoadingAccounts] = useState(true);
   const [accountsError, setAccountsError] = useState(null);
+  const [users, setUsers] = useState([]);
+  const [loadingUsers, setLoadingUsers] = useState(true);
+  const [usersError, setUsersError] = useState(null);
+  const [governanceSelectedUser, setGovernanceSelectedUser] = useState(null);
   const [successBanner, setSuccessBanner] = useState(null);
 
   // Modals state
   const [createAccountModalOpen, setCreateAccountModalOpen] = useState(false);
   const [assigningAccount, setAssigningAccount] = useState(null);
+
+  const usersById = useMemo(() => {
+    const map = new Map();
+    for (const u of users) {
+      map.set(u.id, u);
+    }
+    return map;
+  }, [users]);
 
   const fetchAccounts = useCallback(async () => {
     setLoadingAccounts(true);
@@ -40,9 +53,27 @@ export function AdminPortalPage() {
     }
   }, []);
 
+  const fetchUsers = useCallback(async () => {
+    setLoadingUsers(true);
+    setUsersError(null);
+    try {
+      const res = await api.get('/api/admin/users');
+      if (res && Array.isArray(res.users)) {
+        setUsers(res.users);
+      } else {
+        setUsers([]);
+      }
+    } catch (err) {
+      setUsersError(err.message || 'Failed to fetch registered users');
+    } finally {
+      setLoadingUsers(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetchAccounts();
-  }, [fetchAccounts]);
+    fetchUsers();
+  }, [fetchAccounts, fetchUsers]);
 
   const handleCreateSuccess = (newAccount) => {
     setSuccessBanner(`Customer account ${newAccount.account_number} created successfully.`);
@@ -50,7 +81,9 @@ export function AdminPortalPage() {
   };
 
   const handleAssignSuccess = (updatedAccount) => {
-    setSuccessBanner(`Account ${updatedAccount.account_number} assigned to user ${updatedAccount.user_id} successfully.`);
+    const owner = usersById.get(updatedAccount.user_id);
+    const ownerLabel = owner ? `${owner.username} (${updatedAccount.user_id})` : updatedAccount.user_id;
+    setSuccessBanner(`Account ${updatedAccount.account_number} assigned to user ${ownerLabel} successfully.`);
     fetchAccounts();
   };
 
@@ -140,7 +173,7 @@ export function AdminPortalPage() {
             cursor: 'pointer',
           }}
         >
-          👥 User Governance (Role & Status)
+          👥 Registered Users & Governance
         </button>
       </div>
 
@@ -210,6 +243,7 @@ export function AdminPortalPage() {
                     {accounts.map((acc, idx) => {
                       const isCustomer = acc.account_type === 'customer';
                       const isAssigned = Boolean(acc.user_id);
+                      const ownerUser = isAssigned ? usersById.get(acc.user_id) : null;
 
                       return (
                         <tr
@@ -238,7 +272,7 @@ export function AdminPortalPage() {
                           <td style={{ padding: '0.85rem 1rem', color: '#475569' }}>
                             {isAssigned ? (
                               <span style={{ color: '#166534', fontWeight: '600', fontSize: '0.8rem' }}>
-                                Assigned ({acc.user_id.slice(0, 8)}...)
+                                Assigned ({ownerUser ? `${ownerUser.username} · ` : ''}{acc.user_id.slice(0, 8)}...)
                               </span>
                             ) : isCustomer ? (
                               <span style={{ color: '#b45309', fontWeight: '600', fontSize: '0.8rem' }}>
@@ -297,9 +331,22 @@ export function AdminPortalPage() {
         </>
       )}
 
-      {/* Tab 2: User Governance */}
+      {/* Tab 2: User Directory & Governance */}
       {activeTab === 'users' && (
-        <UserGovernanceForm currentAdminUserId={user?.id} />
+        <>
+          <RegisteredUsersTable
+            users={users}
+            loading={loadingUsers}
+            error={usersError}
+            onSelectUser={(selected) => setGovernanceSelectedUser({ ...selected })}
+          />
+          <UserGovernanceForm
+            currentAdminUserId={user?.id}
+            users={users}
+            selectedUser={governanceSelectedUser}
+            onUserUpdated={fetchUsers}
+          />
+        </>
       )}
 
       {/* Modals */}
@@ -312,6 +359,7 @@ export function AdminPortalPage() {
       <AssignOwnerModal
         isOpen={Boolean(assigningAccount)}
         account={assigningAccount}
+        users={users}
         onClose={() => setAssigningAccount(null)}
         onSuccess={handleAssignSuccess}
       />

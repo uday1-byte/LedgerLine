@@ -1,6 +1,6 @@
-# LedgerLine - Prompt & Engineering Log
+# BalanceVault (formerly LedgerLine) - Prompt & Engineering Log
 
-This document records the user prompts, agent decisions, design rationales, and execution history across the development lifecycle of LedgerLine.
+This document records the user prompts, agent decisions, design rationales, errors, corrections, and execution history across the development lifecycle of **BalanceVault** (formerly **LedgerLine**).
 
 ---
 
@@ -718,4 +718,62 @@ To preserve separation between backend test adjustments, frontend dependencies, 
    - Output: `dist/index.html` (0.63 kB), `dist/assets/index-D2FUEpWX.css` (1.44 kB), `dist/assets/index-DL91vskZ.js` (325.93 kB).
    - Results: 73 modules transformed, **0 errors, 0 warnings** (built in 2.48 s).
 5. **Git Repository Status:**
-   - The three commits 3f6cc3c, f652a7d and 89417c7 were successfully pushed to origin/main. The branch was subsequently verified synchronized with the remote and the working tree clean.
+   - The three commits 3f6cc3c, f652a7d and 89417c7 were successfully pushed to origin/main, followed on 2026-11-09 (`15:09 +05:30`) by commit `e87eb57` (`docs: finalize LedgerLine project documentation`) updating `README.md`, `THREATS.md`, and `PROMPTS.md`.
+
+---
+
+## Phase 8: Zod v4 Registration Fix, Prisma ORM, Redis Rate Limiting & Production Hardening (2026-11-11, Commit `092e318`)
+
+### Requests & Objectives (from Session Prompt Log)
+1. **Frontend Registration Error Investigation (`2026-11-11`):** Diagnosed why registration validation failures surfaced generic fallback errors instead of structured field messages: Zod v4 exposes validation issues on `error.issues` rather than `error.errors`. Approved fix replaced `parseResult.error.errors.map(...)` with `parseResult.error.issues.map(...)` in `backend/src/routes/auth.js` and improved frontend API error handling (`frontend/src/api/client.js`, `LoginPage.jsx`) with regression tests in `backend/tests/auth.test.js` and `frontend/src/test/authScreens.test.jsx`.
+2. **Prisma ORM & Schema Synchronization (`2026-11-11`):** Following a read-only compliance audit showing Prisma and Redis were not yet integrated and `ledgerline_dev` still had only migration `001` applied while `ledgerline_test` had `001`–`006`:
+   - Removed a UTF-8 BOM in `database/migrations/006_complete_banking_functionality.sql` and synchronized `ledgerline_dev` cleanly through migrations `002`–`006`.
+   - Introspected PostgreSQL into `backend/prisma/schema.prisma`, configured `backend/src/config/prisma.js` strictly under `DATABASE_URL` (`ledgerline_app`), and migrated ordinary read endpoints (`GET /api/accounts`, `GET /api/accounts/:id`) to Prisma while keeping raw parameterized `pg.Pool` transactions (`FOR UPDATE`, deferred balancing triggers, `auditService`) for financial mutations.
+3. **Redis-Backed Fail-Closed Rate Limiting & Health Probes (`2026-11-11`):**
+   - Added `ioredis ^5.6.0`, `express-rate-limit ^8.7.4`, and `rate-limit-redis ^6.0.2`.
+   - Implemented `authLimiter` (10 req / 15 min / IP on `/api/auth/register` and `/api/auth/login`, failing closed `503` in production and falling back to `MemoryStore` only in development/test) and `financialMutationLimiter` (30 req / min / user, strictly failing closed `503` in all environments when Redis is unavailable).
+   - Added `/api/health/live` (dependency-free liveness probe) and `/api/health/ready` (`pg.Pool` + `prisma.$queryRaw` + Redis `PING`) in `backend/src/routes/health.js`, alongside backward-compatible `/api/health`.
+4. **Production Hardening, Render Blueprint & Repository Hygiene (`2026-11-11`):**
+   - Implemented strict `NODE_ENV=production` fail-fast validation in `backend/src/config/env.js` (enforcing strong `JWT_SECRET`, `ledgerline_app` TLS `DATABASE_URL`, non-localhost `REDIS_URL`, `CLIENT_URL`, and `RATE_LIMIT_ENABLED=true`).
+   - Added `app.set('trust proxy', 1)` in `backend/src/app.js`, `VITE_API_BASE_URL` support in `frontend/src/api/client.js`, and Render multi-service Blueprint `render.yaml` (`balancevault-api` + `balancevault-web` with SPA rewrite).
+   - Restored `database/migrations/004_create_users_and_authentication.sql` to `HEAD` and fixed trailing blank-line-at-EOF warnings across `prisma.js`, `migrations.test.js`, `prisma.test.js`, and `render.yaml`.
+
+### Verification & Outcome (Commit `092e318`, `2026-11-11 23:56:38 +05:30`)
+- **Backend (`npm.cmd --prefix backend test`):** **15 suites passed, 161 tests passed, 0 failed** (added `env.test.js`, `migrations.test.js`, `prisma.test.js`, `ratelimit.test.js`, plus expanded `auth.test.js` and `health.test.js`).
+- **Frontend (`npm.cmd --prefix frontend test -- --run`):** **10 files passed, 117 tests passed, 0 failed**, plus clean Vite production build.
+- **Database Provisioning:** Neon production migrations (`001`–`006`) and initial production administrator bootstrap completed.
+
+---
+
+## Phase 9: Render Live Deployment, Redis Lifecycle Fix & Final Enhancements (2026-11-11 to 2026-11-12)
+
+### 9.1 Production Health Probe Check & Redis Lifecycle Fix (Commit `0511130`, `2026-11-12 00:43:38 +05:30`)
+- **Health 404 Investigation (`2026-11-11`):** Investigated deployed Render `404` responses on `GET /api/health/live` and `GET /api/health/ready`. Verified locally against `092e318` that `app.js` and `health.js` mounted both routes properly; confirmed the prior `e87eb57` commit lacked `/live` and `/ready` before Render rebuilt `092e318`. Expanded `backend/tests/health.test.js` (`9` tests) covering dependency isolation on `/live` and `503` degradation when PostgreSQL, Prisma, or Redis fails.
+- **Observed Production Redis Error:** After deploying to Render with Render Key Value, live `GET /api/health/ready` reported PostgreSQL and Prisma `connected`, while Redis reported `disconnected` with error `"Stream isn't writeable and enableOfflineQueue options is false"`.
+- **Root Cause & Fix:**
+  1. `server.js` did not call `initializeRedis()` on boot, leaving `client === null` until the first request. `checkRedisConnection()` then called `client.ping()` immediately while `ioredis` (`lazyConnect: true`, `enableOfflineQueue: false`) was still in `'wait'`/`'connecting'`.
+  2. `redis.js` previously marked `isConnected = true` on raw TCP `'connect'` rather than waiting for `'ready'` (after TLS/AUTH), lacked `'reconnecting'`/`'end'` resets, and lacked `family: 0` dual-stack DNS resolution for `REDIS_URL`.
+  3. Updated [`backend/src/config/redis.js`](file:///d:/LedgerLine/backend/src/config/redis.js) (`startConnect()`, `waitForRedisReady()`, `family: 0`, strict `'ready'` state tracking) and [`backend/src/server.js`](file:///d:/LedgerLine/backend/src/server.js) (`initializeRedis()` at boot), preserving fail-closed rate limiters. Added 5 deterministic RESP lifecycle/reconnection tests in [`backend/tests/redis.test.js`](file:///d:/LedgerLine/backend/tests/redis.test.js).
+- **Verified Outcome:** Local backend Jest suite passed with **16 suites, 169 tests**. Following commit `0511130` and Render redeploy (`https://balancevault-api-7typ.onrender.com` and `https://balancevault-web-25xe.onrender.com`), live production `GET /api/health/ready` confirmed PostgreSQL, Prisma, and Redis healthy, and live customer registration, login, and empty customer dashboard load succeeded. Live financial transactions (`deposit`, `withdraw`, `transfer`, `reversal`) have not yet been tested in production.
+
+### 9.2 Admin User Directory & Searchable Assignment (`2026-11-12`, Uncommitted — Locally Tested Only)
+- **Request:** Audited production admin provisioning workflow; manual UUID copy/paste was functional for admins, and the optional enhancement was approved: add `GET /api/admin/users` (admin-only, safe fields only, never `password_hash`) and searchable UI tables/selectors.
+- **Implementation:**
+  - Added `GET /api/admin/users` in [`backend/src/routes/admin.js`](file:///d:/LedgerLine/backend/src/routes/admin.js) with validated `search` (`username`/`email` `ILIKE`), `role`, and `is_active` filters.
+  - Added [`RegisteredUsersTable.jsx`](file:///d:/LedgerLine/frontend/src/components/admin/RegisteredUsersTable.jsx) and [`UserSelectField.jsx`](file:///d:/LedgerLine/frontend/src/components/admin/UserSelectField.jsx); updated [`AdminPortalPage.jsx`](file:///d:/LedgerLine/frontend/src/pages/AdminPortalPage.jsx), [`AssignOwnerModal.jsx`](file:///d:/LedgerLine/frontend/src/components/admin/AssignOwnerModal.jsx) (searchable customer dropdown + manual UUID fallback), and [`UserGovernanceForm.jsx`](file:///d:/LedgerLine/frontend/src/components/admin/UserGovernanceForm.jsx).
+  - Added RBAC and component tests in [`backend/tests/rbac.test.js`](file:///d:/LedgerLine/backend/tests/rbac.test.js) and [`frontend/src/test/admin.test.jsx`](file:///d:/LedgerLine/frontend/src/test/admin.test.jsx).
+- **Status:** **Locally tested; not yet pushed, deployed, or verified live in production.**
+
+### 9.3 Transfer Amount BigInt Precision Correction (`2026-11-12`, Uncommitted — Locally Tested Only)
+- **Request:** A read-only audit identified that `transferSchema` in `backend/src/routes/transfers.js` still converted string `amountPaise` with `parseInt(val, 10)`, risking IEEE 754 precision loss above `Number.MAX_SAFE_INTEGER` unlike `/deposit` and `/withdraw`.
+- **Implementation:** Replaced `parseInt` in [`backend/src/routes/transfers.js`](file:///d:/LedgerLine/backend/src/routes/transfers.js) with shared `amountPaiseSchema` (`BigInt` conversion, safe positive integers or `/^[1-9]\d*$/` strings up to `PG_MAX_BIGINT = 9223372036854775807n`) and added 5 regression tests in [`backend/tests/transfers.test.js`](file:///d:/LedgerLine/backend/tests/transfers.test.js) covering values beyond `MAX_SAFE_INTEGER`, `PG_MAX_BIGINT`, malformed inputs, 1-paise idempotency conflict detection, and concurrent transfers.
+- **Status:** **Locally tested; not yet pushed, deployed, or verified live in production.**
+
+### 9.4 BalanceVault Frontend UI Rebranding (`2026-11-12`, Uncommitted — Locally Tested Only)
+- **Request:** Replace all public-facing UI occurrences of `LedgerLine` with `BalanceVault` while preserving internal database/role names, package names (`ledgerline-frontend`), and `sessionStorage` compatibility keys (`ledgerline_session_token`, `ledgerline_pending_mutation`).
+- **Implementation:** Updated [`frontend/index.html`](file:///d:/LedgerLine/frontend/index.html), [`Navbar.jsx`](file:///d:/LedgerLine/frontend/src/components/layout/Navbar.jsx), [`App.jsx`](file:///d:/LedgerLine/frontend/src/App.jsx), [`StatementHeader.jsx`](file:///d:/LedgerLine/frontend/src/components/statements/StatementHeader.jsx), [`LoginPage.jsx`](file:///d:/LedgerLine/frontend/src/pages/LoginPage.jsx), and [`RegisterPage.jsx`](file:///d:/LedgerLine/frontend/src/pages/RegisterPage.jsx). Verified zero user-facing `LedgerLine` matches remain in `frontend/`.
+- **Status:** **Locally tested (Vitest `120/120` + Vite build); not yet pushed, deployed, or verified live in production.**
+
+### 9.5 Final Submission Documentation, Consistency Alignment & Verification (`2026-11-12`, Uncommitted)
+- **Request:** Update [`README.md`](file:///d:/LedgerLine/README.md), [`PROMPTS.md`](file:///d:/LedgerLine/PROMPTS.md), and [`THREATS.md`](file:///d:/LedgerLine/THREATS.md) consistently under **BalanceVault** naming, evaluate and author standalone technical write-up [`WRITEUP.md`](file:///d:/LedgerLine/WRITEUP.md), align deployment/infrastructure readiness vs. untested live financial workflows, add Redis fail-closed rate limiting to threat mitigations, and run final local verification (`Jest`, `Vitest`, `vite build`, `git diff --check`, and working-tree review) without staging, committing, pushing, or deploying.
+- **Outcome:** Updated `README.md`, `PROMPTS.md`, and `THREATS.md`, created `WRITEUP.md`, verified **178 backend tests across 16 Jest suites** and **120 frontend tests across 10 Vitest files** (**298 tests total**), verified clean Vite production build, and confirmed zero `git diff --check` whitespace/EOF errors across all four documents. Live Render deployment reflects commit `0511130` until local changes are reviewed, committed, and pushed.
