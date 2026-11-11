@@ -6,9 +6,15 @@ const env = require('./env');
  * Connection configuration is loaded strictly from environment variables.
  * Sensitive credentials like DB_PASSWORD are never hardcoded.
  */
+const useSsl = env.DB_SSL || env.NODE_ENV === 'production';
+
 const poolConfig = env.DATABASE_URL
   ? {
       connectionString: env.DATABASE_URL,
+      ...(useSsl && { ssl: { rejectUnauthorized: true } }),
+      max: 20, // Maximum number of clients in the pool
+      idleTimeoutMillis: 30000, // Close idle clients after 30s
+      connectionTimeoutMillis: 5000, // Return an error after 5s if connection cannot be established
     }
   : {
       host: env.DB_HOST,
@@ -16,6 +22,7 @@ const poolConfig = env.DATABASE_URL
       database: env.DB_NAME,
       user: env.DB_USER,
       password: env.DB_PASSWORD,
+      ssl: useSsl ? { rejectUnauthorized: true } : false,
       // Pool sizing and connection timeout
       max: 20, // Maximum number of clients in the pool
       idleTimeoutMillis: 30000, // Close idle clients after 30s

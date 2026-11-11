@@ -1,6 +1,7 @@
-﻿const express = require('express');
+const express = require('express');
 const { z } = require('zod');
 const { pool } = require('../config/db');
+const prisma = require('../config/prisma');
 const { authenticateJWT, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
@@ -25,29 +26,30 @@ const createAccountSchema = z.object({
  */
 router.get('/', authenticateJWT, async (req, res, next) => {
   try {
-    let query;
-    let params = [];
+    const where = req.user.role === 'account_holder'
+      ? { user_id: req.user.id, account_type: 'customer' }
+      : {};
 
-    if (req.user.role === 'account_holder') {
-      // Strict ownership isolation: only return accounts assigned to this user
-      query = `
-        SELECT id, account_number, balance_paise, account_type, user_id, created_at, updated_at
-        FROM public.accounts
-        WHERE user_id = $1 AND account_type = 'customer'
-        ORDER BY created_at ASC
-      `;
-      params = [req.user.id];
-    } else {
-      // Admins and Auditors can view all accounts
-      query = `
-        SELECT id, account_number, balance_paise, account_type, user_id, created_at, updated_at
-        FROM public.accounts
-        ORDER BY created_at ASC
-      `;
-    }
+    const rows = await prisma.accounts.findMany({
+      where,
+      orderBy: { created_at: 'asc' },
+      select: {
+        id: true,
+        account_number: true,
+        balance_paise: true,
+        account_type: true,
+        user_id: true,
+        created_at: true,
+        updated_at: true,
+      },
+    });
 
-    const result = await pool.query(query, params);
-    return res.json({ accounts: result.rows });
+    const accounts = rows.map((r) => ({
+      ...r,
+      balance_paise: r.balance_paise.toString(),
+    }));
+
+    return res.json({ accounts });
   } catch (err) {
     next(err);
   }
@@ -307,21 +309,30 @@ router.get('/:id', authenticateJWT, async (req, res, next) => {
     }
 
     const accountId = idParam.data;
-    const result = await pool.query(
-      `SELECT id, account_number, balance_paise, account_type, user_id, created_at, updated_at
-       FROM public.accounts
-       WHERE id = $1`,
-      [accountId]
-    );
+    const row = await prisma.accounts.findUnique({
+      where: { id: accountId },
+      select: {
+        id: true,
+        account_number: true,
+        balance_paise: true,
+        account_type: true,
+        user_id: true,
+        created_at: true,
+        updated_at: true,
+      },
+    });
 
-    if (result.rows.length === 0) {
+    if (!row) {
       return res.status(404).json({
         error: 'NotFoundError',
         message: 'Account not found',
       });
     }
 
-    const account = result.rows[0];
+    const account = {
+      ...row,
+      balance_paise: row.balance_paise.toString(),
+    };
 
     // Ownership check for account_holder:
     if (req.user.role === 'account_holder') {

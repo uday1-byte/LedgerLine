@@ -120,6 +120,17 @@ describe('Authentication Foundation & RBAC Middleware Tests (Phase 5 Step 1)', (
       expect(dupRes.statusCode).toBe(409);
       expect(dupRes.body.error).toBe('ConflictError');
     });
+
+    it('should reject empty registration payload with 400 and clear validation message (not 500)', async () => {
+      const res = await request(app)
+        .post('/api/auth/register')
+        .send({});
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body.error).toBe('ValidationError');
+      expect(typeof res.body.message).toBe('string');
+      expect(res.body.message).not.toContain('Cannot read properties');
+    });
   });
 
   describe('POST /api/auth/login', () => {
@@ -168,6 +179,31 @@ describe('Authentication Foundation & RBAC Middleware Tests (Phase 5 Step 1)', (
       expect(res.statusCode).toBe(401);
       expect(res.body.message).toBe('Invalid email or password');
       expect(res.body).not.toHaveProperty('token');
+    });
+
+    it('should reject invalid login email format with 400 and clear validation message (not 500)', async () => {
+      const res = await request(app)
+        .post('/api/auth/login')
+        .send({
+          email: 'invalid_email_format',
+          password: 'AnyPassword123',
+        });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body.error).toBe('ValidationError');
+      expect(res.body.message).toContain('Invalid email address format');
+      expect(res.body.message).not.toContain('Cannot read properties');
+    });
+
+    it('should reject empty login payload with 400 and clear validation message (not 500)', async () => {
+      const res = await request(app)
+        .post('/api/auth/login')
+        .send({});
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body.error).toBe('ValidationError');
+      expect(typeof res.body.message).toBe('string');
+      expect(res.body.message).not.toContain('Cannot read properties');
     });
   });
 

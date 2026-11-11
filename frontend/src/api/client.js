@@ -1,5 +1,5 @@
 /**
- * Centralized API Client for LedgerLine
+ * Centralized API Client for BalanceVault (LedgerLine)
  * 
  * Security Invariants & Policy:
  * 1. Tokens are never stored in localStorage (preventing persistent cross-session XSS token leakage).
@@ -8,7 +8,8 @@
  *    is vulnerable to same-origin XSS within the tab lifecycle, but is automatically wiped when the tab closes.
  * 3. The client never logs passwords, JWTs, or sensitive authorization headers.
  * 4. HTTP 401 responses trigger immediate session invalidation and token clearing.
- * 5. Uses standard relative path `/api` routed via Vite proxy to the Express backend.
+ * 5. Resolves VITE_API_BASE_URL when configured for standalone production hosting,
+ *    falling back to relative `/api` paths routed via the Vite dev proxy locally.
  */
 
 const TOKEN_STORAGE_KEY = 'ledgerline_session_token';
@@ -76,7 +77,32 @@ export class ApiError extends Error {
 }
 
 /**
- * Executes an HTTP request against the LedgerLine backend API.
+ * Resolves an API endpoint against VITE_API_BASE_URL when configured,
+ * preserving relative `/api/...` paths for local Vite dev proxy fallback.
+ *
+ * @param {string} endpoint - API endpoint path (e.g. '/api/auth/me')
+ * @param {string} [apiBaseUrl] - Optional override base URL (defaults to VITE_API_BASE_URL)
+ * @returns {string} Resolved request URL
+ */
+export function resolveApiUrl(endpoint, apiBaseUrl = import.meta.env?.VITE_API_BASE_URL) {
+  if (/^https?:\/\//i.test(endpoint)) {
+    return endpoint;
+  }
+
+  const normalizedBase = typeof apiBaseUrl === 'string'
+    ? apiBaseUrl.trim().replace(/\/+$/, '')
+    : '';
+
+  if (!normalizedBase) {
+    return endpoint;
+  }
+
+  const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  return `${normalizedBase}${normalizedEndpoint}`;
+}
+
+/**
+ * Executes an HTTP request against the BalanceVault backend API.
  * 
  * @param {string} endpoint - API endpoint path (e.g. '/api/auth/me')
  * @param {object} options - Fetch options (method, body, headers, etc.)
@@ -113,9 +139,11 @@ export async function apiRequest(endpoint, options = {}) {
     ...restOptions,
   };
 
+  const targetUrl = resolveApiUrl(endpoint);
+
   let response;
   try {
-    response = await fetch(endpoint, fetchOptions);
+    response = await fetch(targetUrl, fetchOptions);
   } catch (netErr) {
     throw new ApiError(0, null, 'Network connection failed. Please ensure the backend server is running.');
   }

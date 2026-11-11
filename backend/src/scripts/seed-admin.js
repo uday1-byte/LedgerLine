@@ -44,14 +44,38 @@ async function seedAdmin() {
     process.exit(1);
   }
 
+  // Production admin bootstrap safety checks
+  if (env.NODE_ENV === 'production') {
+    if (env.DB_NAME !== 'neondb') {
+      console.error('Error: Production admin bootstrap must target the Neon database "neondb".');
+      process.exit(1);
+    }
+
+    if (!env.DB_SSL) {
+      console.error('Error: Production admin bootstrap requires DB_SSL=true.');
+      process.exit(1);
+    }
+
+    if (ownerUser !== 'ledgerline_owner') {
+      console.error('Error: Production admin bootstrap must use ledgerline_owner.');
+      process.exit(1);
+    }
+
+    if (env.DB_HOST === 'localhost' || env.DB_HOST === '127.0.0.1') {
+      console.error('Error: Production admin bootstrap cannot target localhost.');
+      process.exit(1);
+    }
+  }
+
   const ownerPool = new Pool({
     host: env.DB_HOST,
     port: env.DB_PORT,
     database: env.DB_NAME,
     user: ownerUser,
     password: ownerPassword,
+    ssl: env.DB_SSL ? { rejectUnauthorized: true } : false,
     max: 1,
-    connectionTimeoutMillis: 5000,
+    connectionTimeoutMillis: 10000,
   });
 
   const client = await ownerPool.connect();

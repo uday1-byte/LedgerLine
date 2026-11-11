@@ -9,6 +9,7 @@ const {
 } = require('../utils/password');
 const { generateToken } = require('../utils/jwt');
 const { authenticateJWT } = require('../middleware/auth');
+const { authLimiter } = require('../middleware/rateLimiter');
 
 const router = express.Router();
 
@@ -46,13 +47,16 @@ const loginSchema = z.object({
 
 // ─── 1. POST /api/auth/register ──────────────────────────────────────────────
 
-router.post('/register', async (req, res, next) => {
+router.post('/register', authLimiter, async (req, res, next) => {
   try {
     const parseResult = registerSchema.safeParse(req.body);
     if (!parseResult.success) {
+      const message = parseResult.error.issues
+        ? parseResult.error.issues.map((e) => e.message).join('; ')
+        : 'Validation failed';
       return res.status(400).json({
         error: 'ValidationError',
-        message: parseResult.error.errors.map((e) => e.message).join('; '),
+        message,
       });
     }
 
@@ -118,13 +122,16 @@ router.post('/register', async (req, res, next) => {
 
 // ─── 2. POST /api/auth/login ─────────────────────────────────────────────────
 
-router.post('/login', async (req, res, next) => {
+router.post('/login', authLimiter, async (req, res, next) => {
   try {
     const parseResult = loginSchema.safeParse(req.body);
     if (!parseResult.success) {
+      const message = parseResult.error.issues
+        ? parseResult.error.issues.map((e) => e.message).join('; ')
+        : 'Validation failed';
       return res.status(400).json({
         error: 'ValidationError',
-        message: parseResult.error.errors.map((e) => e.message).join('; '),
+        message,
       });
     }
 

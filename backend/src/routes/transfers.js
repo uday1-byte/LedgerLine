@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const { z } = require('zod');
 const { pool } = require('../config/db');
 const { authenticateJWT, requireRole } = require('../middleware/auth');
+const { financialMutationLimiter } = require('../middleware/rateLimiter');
 const auditService = require('../services/auditService');
 
 const SYSTEM_CASH_CLEARING_ID = '00000000-0000-0000-0000-000000000002';
@@ -66,7 +67,7 @@ const withdrawalSchema = z.object({
  * @desc    Execute an idempotent money transfer between two accounts with double-entry ledger entries
  * @access  Private (account_holder, admin)
  */
-router.post('/', authenticateJWT, requireRole('admin', 'account_holder'), async (req, res, next) => {
+router.post('/', authenticateJWT, requireRole('admin', 'account_holder'), financialMutationLimiter, async (req, res, next) => {
   // 1. Validate mandatory Idempotency-Key header
   const idempotencyKey = req.header('Idempotency-Key');
   if (!idempotencyKey || typeof idempotencyKey !== 'string' || idempotencyKey.trim().length === 0) {
@@ -339,7 +340,7 @@ router.post('/', authenticateJWT, requireRole('admin', 'account_holder'), async 
  * @desc    Execute an idempotent cash deposit crediting customer account and debiting SYSTEM_CASH_CLEARING
  * @access  Private (account_holder, admin)
  */
-router.post('/deposit', authenticateJWT, requireRole('admin', 'account_holder'), async (req, res, next) => {
+router.post('/deposit', authenticateJWT, requireRole('admin', 'account_holder'), financialMutationLimiter, async (req, res, next) => {
   // 1. Validate mandatory Idempotency-Key header
   const idempotencyKey = req.header('Idempotency-Key');
   if (!idempotencyKey || typeof idempotencyKey !== 'string' || idempotencyKey.trim().length === 0) {
@@ -670,7 +671,7 @@ router.post('/deposit', authenticateJWT, requireRole('admin', 'account_holder'),
  * @desc    Execute an idempotent cash withdrawal debiting customer account and crediting SYSTEM_CASH_CLEARING
  * @access  Private (account_holder, admin)
  */
-router.post('/withdraw', authenticateJWT, requireRole('admin', 'account_holder'), async (req, res, next) => {
+router.post('/withdraw', authenticateJWT, requireRole('admin', 'account_holder'), financialMutationLimiter, async (req, res, next) => {
   // 1. Validate mandatory Idempotency-Key header
   const idempotencyKey = req.header('Idempotency-Key');
   if (!idempotencyKey || typeof idempotencyKey !== 'string' || idempotencyKey.trim().length === 0) {
@@ -1061,7 +1062,7 @@ router.post('/withdraw', authenticateJWT, requireRole('admin', 'account_holder')
  * @desc    Execute a compensating reversal for an existing customer transfer with double-entry ledger entries
  * @access  Private (account_holder, admin)
  */
-router.post('/:id/reversal', authenticateJWT, requireRole('admin', 'account_holder'), async (req, res, next) => {
+router.post('/:id/reversal', authenticateJWT, requireRole('admin', 'account_holder'), financialMutationLimiter, async (req, res, next) => {
   // 1. Validate mandatory Idempotency-Key header
   const idempotencyKey = req.header('Idempotency-Key');
   if (!idempotencyKey || typeof idempotencyKey !== 'string' || idempotencyKey.trim().length === 0) {

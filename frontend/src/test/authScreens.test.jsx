@@ -114,6 +114,22 @@ describe('LoginPage Component', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(/Password is required/i);
   });
 
+  it('displays validation error if email format is invalid without making an API request', async () => {
+    const postSpy = vi.spyOn(api, 'post');
+    renderLoginPage();
+    const emailInput = screen.getByLabelText(/Email Address/i);
+    const passwordInput = screen.getByLabelText(/^Password/i);
+    const submitBtn = screen.getByRole('button', { name: /Sign In/i });
+
+    // User entered raw username instead of valid email
+    fireEvent.change(emailInput, { target: { value: 'alice_holder' } });
+    fireEvent.change(passwordInput, { target: { value: 'ValidPass123' } });
+    fireEvent.click(submitBtn);
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/Please enter a valid email address/i);
+    expect(postSpy).not.toHaveBeenCalled();
+  });
+
   it('executes successful login, clears password, calls AuthContext login, and redirects', async () => {
     const postSpy = vi.spyOn(api, 'post').mockResolvedValue({
       message: 'Login successful',
@@ -216,6 +232,33 @@ describe('LoginPage Component', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(
       'Registration successful! Please sign in with your new credentials.'
     );
+  });
+
+  it('dismisses registration success message when user clicks close or submits with an error', async () => {
+    vi.spyOn(api, 'post').mockRejectedValue(
+      new ApiError(401, { error: 'Unauthorized', message: 'Invalid email or password' }, 'Invalid email or password')
+    );
+
+    renderLoginPage({ message: 'Registration successful! Please sign in with your new credentials.' });
+
+    // Initial state: success message is displayed
+    expect(screen.getByRole('alert')).toHaveTextContent(/Registration successful/i);
+
+    const emailInput = screen.getByLabelText(/Email Address/i);
+    const passwordInput = screen.getByLabelText(/^Password/i);
+    const submitBtn = screen.getByRole('button', { name: /Sign In/i });
+
+    fireEvent.change(emailInput, { target: { value: 'alice@example.com' } });
+    fireEvent.change(passwordInput, { target: { value: 'WrongPass123' } });
+    fireEvent.click(submitBtn);
+
+    // After login failure, only error alert is displayed; success message is cleared
+    await waitFor(() => {
+      const alerts = screen.getAllByRole('alert');
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]).toHaveTextContent('Invalid email or password');
+      expect(alerts[0]).not.toHaveTextContent(/Registration successful/i);
+    });
   });
 
   it('redirects to dashboard immediately if user is already authenticated', () => {

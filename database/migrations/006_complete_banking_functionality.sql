@@ -1,4 +1,4 @@
-﻿-- =============================================================================
+-- =============================================================================
 -- Migration: 006_complete_banking_functionality.sql
 -- Description: Phase 6 Complete Banking Functionality Schema Migration
 --              - Expands account_type CHECK constraint ('system_clearing')

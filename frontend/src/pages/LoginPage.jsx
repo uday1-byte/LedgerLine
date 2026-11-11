@@ -16,7 +16,7 @@ export function LoginPage() {
   const [error, setError] = useState(null);
 
   // If redirected from successful registration, display friendly success alert
-  const registrationSuccessMessage = location.state?.message || null;
+  const [successMessage, setSuccessMessage] = useState(() => location.state?.message || null);
 
   // Destination to return after successful login
   const from = location.state?.from?.pathname || '/';
@@ -29,10 +29,16 @@ export function LoginPage() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError(null);
+    setSuccessMessage(null);
 
     const trimmedEmail = email.trim().toLowerCase();
     if (!trimmedEmail) {
       setError('Email address is required');
+      return;
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+      setError('Please enter a valid email address (e.g. user@example.com)');
       return;
     }
 
@@ -99,8 +105,12 @@ export function LoginPage() {
           </p>
         </div>
 
-        {registrationSuccessMessage && (
-          <Alert type="success" message={registrationSuccessMessage} />
+        {successMessage && !error && (
+          <Alert
+            type="success"
+            message={successMessage}
+            onClose={() => setSuccessMessage(null)}
+          />
         )}
 
         {error && (

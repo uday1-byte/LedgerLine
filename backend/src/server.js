@@ -1,5 +1,7 @@
 const app = require('./app');
 const env = require('./config/env');
+const prisma = require('./config/prisma');
+const { closeRedis } = require('./config/redis');
 
 const PORT = env.PORT || 5000;
 
@@ -14,10 +16,14 @@ const server = app.listen(PORT, () => {
 });
 
 // Graceful shutdown
-const gracefulShutdown = () => {
+const gracefulShutdown = async () => {
   console.log('Received shutdown signal, closing server gracefully...');
-  server.close(() => {
+  server.close(async () => {
     console.log('HTTP server closed.');
+    try {
+      await prisma.$disconnect();
+      await closeRedis();
+    } catch (_) {}
     process.exit(0);
   });
 };

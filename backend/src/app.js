@@ -9,6 +9,10 @@ const env = require('./config/env');
 
 const app = express();
 
+// Trust exactly 1 proxy hop (Render edge load balancer) so req.ip reflects true client IP
+// without trusting arbitrary spoofed X-Forwarded-For hops.
+app.set('trust proxy', 1);
+
 // Enable Cross-Origin Resource Sharing (CORS) for frontend client
 app.use(
   cors({

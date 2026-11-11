@@ -1,8 +1,25 @@
 const request = require('supertest');
+const RedisMock = require('ioredis-mock');
 const app = require('../src/app');
+const { setRedisClientForTesting, closeRedis } = require('../src/config/redis');
+const { pool } = require('../src/config/db');
+const prisma = require('../src/config/prisma');
 
-describe('Health & Root Endpoints', () => {
-  describe('GET /', () => {
+describe('Health & Readiness Endpoints', () => {
+  let mockRedis;
+
+  beforeAll(async () => {
+    mockRedis = new RedisMock();
+    setRedisClientForTesting(mockRedis);
+  });
+
+  afterAll(async () => {
+    await closeRedis();
+    await pool.end();
+    await prisma.$disconnect();
+  });
+
+  describe('GET / (Root Welcome)', () => {
     it('should return 200 OK and welcome payload', async () => {
       const res = await request(app).get('/');
 
@@ -12,17 +29,53 @@ describe('Health & Root Endpoints', () => {
     });
   });
 
-  describe('GET /api/health', () => {
-    it('should return 200 OK with healthy status and metadata', async () => {
+  describe('GET /api/health/live (Liveness Probe)', () => {
+    it('should return 200 OK without dependencies even if Redis is disconnected', async () => {
+      setRedisClientForTesting(null);
+
+      const res = await request(app).get('/api/health/live');
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toHaveProperty('status', 'healthy');
+      expect(res.body).toHaveProperty('probe', 'liveness');
+      expect(res.body).toHaveProperty('uptime');
+      expect(res.body).toHaveProperty('timestamp');
+    });
+  });
+
+  describe('GET /api/health/ready (Readiness Probe)', () => {
+    it('should return 200 OK when both PostgreSQL and Redis are connected', async () => {
+      setRedisClientForTesting(mockRedis);
+
+      const res = await request(app).get('/api/health/ready');
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toHaveProperty('status', 'healthy');
+      expect(res.body).toHaveProperty('probe', 'readiness');
+      expect(res.body.dependencies.database.status).toBe('connected');
+      expect(res.body.dependencies.redis.status).toBe('connected');
+    });
+
+    it('should return 503 Service Unavailable when Redis is disconnected', async () => {
+      setRedisClientForTesting(null);
+
+      const res = await request(app).get('/api/health/ready');
+
+      expect(res.statusCode).toBe(503);
+      expect(res.body).toHaveProperty('status', 'degraded');
+      expect(res.body.dependencies.redis.status).toBe('disconnected');
+    });
+  });
+
+  describe('GET /api/health (Backward Compatibility Endpoint)', () => {
+    it('should return health payload with dependency details', async () => {
+      setRedisClientForTesting(mockRedis);
+
       const res = await request(app).get('/api/health');
 
       expect(res.statusCode).toBe(200);
       expect(res.body).toHaveProperty('status', 'healthy');
-      expect(res.body).toHaveProperty('service', 'LedgerLine API');
-      expect(res.body).toHaveProperty('environment');
-      expect(res.body).toHaveProperty('uptime');
-      expect(res.body).toHaveProperty('timestamp');
-      expect(res.body.database).toHaveProperty('status', 'untested');
+      expect(res.body.dependencies).toBeDefined();
     });
   });
 
